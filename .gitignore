@@ -1,0 +1,12 @@
+# Artifacts (generated logs, fixes, hints)
+artifacts/
+
+# Environment variables (secrets)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
