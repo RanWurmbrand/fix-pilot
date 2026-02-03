@@ -88,7 +88,7 @@ Analyze the code around the failing line to determine WHAT to capture from:
    // ===== INJECTED: Capture DOM before failure =====
    try {
      const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
-     const outputPath = '/home/rwurmbra/Desktop/projects/n8nrootcauseai/artifacts/dom_snapshots/failure-capture-' + timestamp + '.html';
+     const outputPath = process.cwd() + '/artifacts/dom_snapshots/failure-capture-' + timestamp + '.html';
 
      // Import fs if not already imported
      const fs = require('fs');
@@ -162,10 +162,11 @@ Analyze the code around the failing line to determine WHAT to capture from:
 ### Step 4: Run the Test
 Execute the original test using Bash:
 ```bash
-cd /home/rwurmbra/Desktop/rootcause_folders/editor-extensions/tests
+cd <project_test_directory>
 npx playwright test <test_file>
 ```
 
+Replace `<project_test_directory>` with the actual test directory path from the project.
 Replace `<test_file>` with the actual test file path from the parameters (e.g., `e2e/tests/analyze_coolstore.test.ts`).
 
 The test will run normally, but when it reaches the modified code (in page object or test file), it will capture DOM and exit.
@@ -173,7 +174,7 @@ The test will run normally, but when it reaches the modified code (in page objec
 ### Step 5: Verify Capture
 Check that the DOM snapshot was created:
 ```bash
-ls -lh /home/rwurmbra/Desktop/projects/n8nrootcauseai/artifacts/dom_snapshots/failure-capture-*.html
+ls -lh ./artifacts/dom_snapshots/failure-capture-*.html
 ```
 
 ### Step 6: Restore Original File
@@ -192,8 +193,8 @@ At the end of your execution, clearly state the results:
 ```
 DOM Capture Complete!
 
-DOM Snapshot: /home/rwurmbra/Desktop/projects/n8nrootcauseai/artifacts/dom_snapshots/failure-capture-2026-01-24T17-30-00.html
-Screenshot: /home/rwurmbra/Desktop/projects/n8nrootcauseai/artifacts/dom_snapshots/failure-capture-2026-01-24T17-30-00.png
+DOM Snapshot: ./artifacts/dom_snapshots/failure-capture-2026-01-24T17-30-00.html
+Screenshot: ./artifacts/dom_snapshots/failure-capture-2026-01-24T17-30-00.png
 Capture Context: vscodeApp.getWindow()
 Format: JSON with recursive iframe capture
 File Restored: Yes
@@ -290,7 +291,7 @@ The temp test file should still be valid TypeScript. Preserve:
 
 All captures go to:
 ```
-/home/rwurmbra/Desktop/projects/n8nrootcauseai/artifacts/dom_snapshots/
+./artifacts/dom_snapshots/
 ├── failure-capture-2026-01-24T17-30-00.html  (DOM snapshot - JSON format with nested iframes)
 └── failure-capture-2026-01-24T17-30-00.png   (Screenshot backup)
 ```

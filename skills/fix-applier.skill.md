@@ -4,7 +4,7 @@ You are a code fix applicator. You have a fix suggestion that needs to be applie
 
 ## Your Task
 
-1. Use Glob to find the latest fix file in `/home/rwurmbra/Desktop/projects/n8nrootcauseai/artifacts/bug_fixes/fix_*.json` (sort by modification time)
+1. Use Glob to find the latest fix file in `./artifacts/bug_fixes/fix_*.json` (relative to project root, sort by modification time)
 2. Read the fix file to get:
    - `functions_to_edit`: which files/functions to modify
    - `reason`: why the fix is needed
