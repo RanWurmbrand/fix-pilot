@@ -115,14 +115,12 @@ def step_generate_fix() -> bool:
     return run_claude_skill("bug-fixer", timeout=360)
 
 
-def step_notify() -> str:
-    """Send Telegram notification and wait for user response."""
+def step_notify() -> None:
+    """Send Telegram notification (no waiting for response)."""
     print("\n[4/5] Sending notification...")
 
     from messaging.bugfix_notifier import BugFixMessageBuilder
     from messaging.telegram_manager import TelegramManager
-    import json
-    import time
 
     builder = BugFixMessageBuilder()
     message, is_long = builder.build_message()
@@ -131,36 +129,12 @@ def step_notify() -> str:
 
     if is_long:
         tm.send_document(message, "bugfix_summary.html", "Bug Fix Summary (see attached)")
-        tm.send_bugfix_message("Full report sent as file. Choose action:")
+        tm.send_message("Applying fix automatically...")
     else:
         tm.send_bugfix_message(message)
+        tm.send_message("Applying fix automatically...")
 
-    print("  Waiting for user response...")
-    action = tm.wait_for_user_response()
-    print(f"  User chose: {action}")
-
-    # Handle suggestion flow
-    if action == "suggest":
-        tm.send_message("Please provide your suggestion:")
-        suggestion = tm.wait_for_text_message()
-        print(f"  Received suggestion: {suggestion[:50]}...")
-
-        # Save suggestion
-        suggestions_dir = ROOT / "artifacts" / "suggestions"
-        suggestions_dir.mkdir(exist_ok=True)
-
-        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-        suggestion_file = suggestions_dir / f"suggestion_{timestamp}.json"
-        suggestion_file.write_text(json.dumps({
-            "timestamp": timestamp,
-            "user_suggestion": suggestion,
-            "action": "re_analyze"
-        }, indent=2))
-
-        tm.send_message("Got it! Re-analyzing...")
-        return "suggest"
-
-    return action
+    print("  Notification sent. Proceeding to apply fix...")
 
 
 def step_apply_fix() -> bool:
@@ -198,8 +172,9 @@ def run_pipeline():
             return False
 
         # Step 4: Notify and get user action
-        action = step_notify()
-
+        actions = step_notify()
+        action = "fix_and_rerun"
+        
         if action == "terminate":
             print("\nPipeline stopped by user")
             return True
