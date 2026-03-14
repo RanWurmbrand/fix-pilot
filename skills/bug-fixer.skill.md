@@ -69,4 +69,21 @@ The fix file should be named: `fix_YYYY-MM-DD_HH-MM-SS.json` (use current timest
 
 Example: `fix_2026-01-23_16-50-15.json`
 
+## Run Report (REQUIRED)
+
+You MUST log your progress to the run report file. The file path is provided in the user prompt as "Run report file: <path>".
+
+**How to log:** Append JSONL entries using Bash:
+```bash
+echo '{"timestamp":"'$(date +%Y-%m-%dT%H:%M:%S)'","skill":"bug-fixer","event":"<event>","message":"<details>"}' >> <report_path>
+```
+
+**Log at these points:**
+- `reading_hint` — Which hint file you're reading and the root cause it describes
+- `investigating` — Which files you're reading to understand the bug
+- `dom_analysis` — If hint has DOM analysis, what selectors you're considering
+- `fix_strategy` — What fix approach you chose and why
+- `error` — When you encounter any unexpected problem
+- `completed` — When done (summarize: fix file written, what it changes)
+
 Now find the latest hint and investigate the bug.

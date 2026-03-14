@@ -60,7 +60,6 @@ class ProjectRunner:
         # Ensure Playwright generates traces for DOM inspection
         env = os.environ.copy()
         env['PLAYWRIGHT_TRACE'] = 'retain-on-failure'
-        print(f"[runner] Enabled Playwright trace generation")
 
         with open(log_file, "w", encoding="utf-8") as log:
             process = subprocess.Popen(
