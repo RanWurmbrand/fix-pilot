@@ -18,7 +18,7 @@ You are a code fix applicator. You have a fix suggestion that needs to be applie
 - Apply ONLY the changes in patch_suggestion
 - Use Edit tool to modify the actual project files
 - After editing, stage with: `git -C <project_path> add <file>`
-- Commit with: `git -C <project_path> commit -m "fix: <reason>\n\nAuto-applied by RootCause AI"`
+- Commit with: `git -C <project_path> commit --no-gpg-sign -m "fix: <reason>\n\nAuto-applied by RootCause AI"`
 
 ## Workflow
 
@@ -46,7 +46,7 @@ You should:
    - Old: `return users.map(user => <UserCard key={user.id} user={user} />);`
    - New: `return (users || []).map(user => <UserCard key={user.id} user={user} />);`
 3. Run: `git add src/components/UserList.tsx`
-4. Run: `git commit -m "fix: Add null check before mapping over users array\n\nAuto-applied by RootCause AI"`
+4. Run: `git commit --no-gpg-sign -m "fix: Add null check before mapping over users array\n\nAuto-applied by RootCause AI"`
 
 ## Important Notes
 

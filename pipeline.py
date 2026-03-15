@@ -74,10 +74,112 @@ def tail_report(report_path: Path, stop_event: threading.Event):
 
 
 # =============================================================================
+# Fix History
+# =============================================================================
+
+def get_project_head_commit() -> str:
+    """Get the current HEAD commit hash of the target project."""
+    project_path = os.getenv("PROJECT_PATH")
+    if not project_path:
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "-C", project_path, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+
+def init_fix_history(session_name: str) -> Path:
+    """Create fix_history.json at pipeline start."""
+    artifacts_dir = ROOT / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    fix_history_path = artifacts_dir / "fix_history.json"
+    fix_history = {
+        "session": session_name,
+        "base_commit": get_project_head_commit(),
+        "supervisor_interventions": 0,
+        "attempts": [],
+    }
+    fix_history_path.write_text(json.dumps(fix_history, indent=2))
+    return fix_history_path
+
+
+def record_attempt(fix_history_path: Path, result: str, error_after: str = None):
+    """Record a fix attempt in fix_history.json."""
+    history = json.loads(fix_history_path.read_text())
+    attempt_num = len(history["attempts"]) + 1
+
+    # Read latest hint file for cause
+    hints_dir = ROOT / "artifacts" / "hints"
+    hint_files = sorted(hints_dir.glob("hint_*.json"), key=lambda f: f.stat().st_mtime)
+    cause = ""
+    if hint_files:
+        try:
+            hint = json.loads(hint_files[-1].read_text())
+            cause = hint.get("cause", "")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Read latest fix file for patch info
+    fixes_dir = ROOT / "artifacts" / "bug_fixes"
+    fix_files = sorted(fixes_dir.glob("fix_*.json"), key=lambda f: f.stat().st_mtime)
+    fix_applied = ""
+    files_changed = []
+    if fix_files:
+        try:
+            fix = json.loads(fix_files[-1].read_text())
+            fix_applied = fix.get("patch_suggestion", "")
+            files_changed = fix.get("functions_to_edit", [])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    attempt = {
+        "attempt": attempt_num,
+        "cause": cause,
+        "fix_applied": fix_applied,
+        "files_changed": files_changed,
+        "commit_hash": get_project_head_commit(),
+        "result": result,
+    }
+    if error_after:
+        attempt["error_after"] = error_after
+
+    history["attempts"].append(attempt)
+    fix_history_path.write_text(json.dumps(history, indent=2))
+
+
+def extract_error_summary(log_path: Path, max_chars: int = 200) -> str:
+    """Extract the actual test assertion error from a log file."""
+    try:
+        content = log_path.read_text(encoding="utf-8", errors="ignore")
+        lines = content.strip().split("\n")
+        # Look for the actual test error (AssertionError, TypeError, etc.)
+        # Search top-down — first assertion/test error is the real one
+        for line in lines:
+            stripped = line.strip()
+            if any(kw in stripped for kw in ["AssertionError:", "AssertionError:", "TypeError:", "Error:", "TimeoutError:"]):
+                # Skip npm wrapper errors and generic lines
+                if "npm error" in stripped or "command failed" in stripped or "exit code" in stripped:
+                    continue
+                return stripped[:max_chars]
+        # Fallback: last non-empty line that isn't npm noise
+        for line in reversed(lines):
+            stripped = line.strip()
+            if stripped and "npm error" not in stripped:
+                return stripped[:max_chars]
+    except OSError:
+        pass
+    return ""
+
+
+# =============================================================================
 # Helpers
 # =============================================================================
 
-def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, report_path: Path = None) -> bool:
+def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, report_path: Path = None, fix_history_path: Path = None) -> bool:
     """
     Run a Claude skill and return success/failure.
     """
@@ -94,13 +196,23 @@ def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, repo
 
     # Add target project dir for skills that need project access
     project_path = os.getenv("PROJECT_PATH")
-    if skill_name in ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier") and project_path:
+    if skill_name in ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier", "fix-supervisor") and project_path:
         prompt += f" The target project is at: {project_path}"
 
     # Pass test command to test-replicator
     if skill_name == "test-replicator":
         execute_command = os.getenv("EXECUTE_COMMAND", "npm test")
         prompt += f" Execute command: {execute_command}"
+
+    # Add fix history path for trace-analyzer, bug-fixer, and fix-supervisor
+    if skill_name in ("trace-analyzer", "bug-fixer", "fix-supervisor") and fix_history_path:
+        prompt += f" Fix history file: {fix_history_path}"
+
+    # Add guidance path for trace-analyzer and bug-fixer if supervisor has written one
+    if skill_name in ("trace-analyzer", "bug-fixer"):
+        guidance_path = ROOT / "artifacts" / "strategy" / "guidance.json"
+        if guidance_path.exists():
+            prompt += f" Supervisor guidance file: {guidance_path}"
 
     # Add report path
     if report_path:
@@ -113,7 +225,7 @@ def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, repo
         "--add-dir", str(ROOT),
     ]
 
-    if skill_name in ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier") and project_path:
+    if skill_name in ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier", "fix-supervisor") and project_path:
         cmd.extend(["--add-dir", project_path])
 
     cmd.extend(["--system-prompt", skill_content, prompt])
@@ -203,16 +315,16 @@ def step_replicate(report_path: Path = None) -> bool:
     return run_claude_skill("test-replicator", timeout=3600, report_path=report_path)
 
 
-def step_analyze(report_path: Path = None) -> bool:
+def step_analyze(report_path: Path = None, fix_history_path: Path = None) -> bool:
     """Analyze test failure using trace-analyzer skill."""
     print("\n[3/6] Analyzing failure...")
-    return run_claude_skill("trace-analyzer", timeout=3600, report_path=report_path)
+    return run_claude_skill("trace-analyzer", timeout=3600, report_path=report_path, fix_history_path=fix_history_path)
 
 
-def step_generate_fix(report_path: Path = None) -> bool:
+def step_generate_fix(report_path: Path = None, fix_history_path: Path = None) -> bool:
     """Generate fix using bug-fixer skill."""
     print("\n[4/6] Generating fix...")
-    return run_claude_skill("bug-fixer", timeout=3600, report_path=report_path)
+    return run_claude_skill("bug-fixer", timeout=3600, report_path=report_path, fix_history_path=fix_history_path)
 
 
 def step_notify_success():
@@ -279,6 +391,80 @@ def step_apply_fix(report_path: Path = None) -> bool:
     return run_claude_skill("fix-applier", timeout=3600, report_path=report_path)
 
 
+def step_supervise(report_path: Path = None, fix_history_path: Path = None) -> bool:
+    """Run the fix supervisor to analyze failure patterns and redirect."""
+    print("\n[SUPERVISOR] Analyzing fix history...")
+    return run_claude_skill("fix-supervisor", timeout=3600, report_path=report_path, fix_history_path=fix_history_path)
+
+
+def apply_supervisor_guidance(fix_history_path: Path, report_path: Path = None) -> bool:
+    """Read supervisor guidance and apply git reset if needed. Returns False if escalating."""
+    guidance_path = ROOT / "artifacts" / "strategy" / "guidance.json"
+    if not guidance_path.exists():
+        print("  WARNING: Supervisor did not produce guidance file")
+        return True
+
+    try:
+        guidance = json.loads(guidance_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  WARNING: Could not read guidance: {e}")
+        return True
+
+    # Check for escalation
+    if guidance.get("escalate"):
+        print("  Supervisor recommends escalation — problem may require manual intervention")
+        if report_path:
+            log_to_report(report_path, "pipeline", "supervisor_escalate", guidance.get("analysis", ""))
+        return False
+
+    # Apply git reset if rewind_commit is specified
+    rewind_commit = guidance.get("rewind_commit")
+    if not rewind_commit:
+        print("  Supervisor provided guidance but no rewind needed")
+        return True
+
+    # Safety check: verify rewind_commit is at or after base_commit
+    history = json.loads(fix_history_path.read_text())
+    base_commit = history.get("base_commit", "")
+    project_path = os.getenv("PROJECT_PATH")
+
+    if base_commit and project_path:
+        # Check if base_commit is an ancestor of rewind_commit (rewind is at or after base)
+        result = subprocess.run(
+            ["git", "-C", project_path, "merge-base", "--is-ancestor", base_commit, rewind_commit],
+            capture_output=True, timeout=10
+        )
+        if result.returncode != 0:
+            print(f"  SAFETY: Refusing to reset — {rewind_commit[:8]} is before base commit {base_commit[:8]}")
+            if report_path:
+                log_to_report(report_path, "pipeline", "supervisor_safety_block",
+                              f"Refused reset to {rewind_commit[:8]}, before base {base_commit[:8]}")
+            return True
+
+    # Do the reset
+    print(f"  Rewinding to commit {rewind_commit[:8]} (attempt {guidance.get('rewind_to_attempt', '?')})...")
+    result = subprocess.run(
+        ["git", "-C", project_path, "reset", "--hard", rewind_commit],
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        print(f"  ERROR: Git reset failed: {result.stderr}")
+        if report_path:
+            log_to_report(report_path, "pipeline", "error", f"Git reset failed: {result.stderr}")
+        return True
+
+    print(f"  Rewound successfully. Direction: {guidance.get('direction', 'N/A')}")
+    if report_path:
+        log_to_report(report_path, "pipeline", "supervisor_rewind",
+                      f"Reset to {rewind_commit[:8]}. Direction: {guidance.get('direction', '')}")
+
+    # Track intervention count
+    history["supervisor_interventions"] = history.get("supervisor_interventions", 0) + 1
+    fix_history_path.write_text(json.dumps(history, indent=2))
+
+    return True
+
+
 # =============================================================================
 # Main Pipeline
 # =============================================================================
@@ -293,36 +479,80 @@ def run_pipeline():
     report_path = create_run_report()
     print(f"Run report: {report_path}")
 
+    session_name = report_path.stem  # e.g. "run_2026-03-14_19-44-57"
+    fix_history_path = init_fix_history(session_name)
+    print(f"Fix history: {fix_history_path}")
+
+    # Clear stale supervisor guidance from previous runs
+    guidance_path = ROOT / "artifacts" / "strategy" / "guidance.json"
+    if guidance_path.exists():
+        guidance_path.unlink()
+        print("Cleared stale supervisor guidance")
+
+    skip_tests = False
+    supervisor_just_ran = False
+
     while True:
-        # Step 1: Run tests
-        success, all_passed = step_run_tests(report_path)
-        if not success:
-            print("\nPipeline stopped: Test execution failed")
-            return False
+        # Step 1: Run tests (skipped if we just ran them in fix_and_rerun)
+        if not skip_tests:
+            success, all_passed = step_run_tests(report_path)
+            if not success:
+                print("\nPipeline stopped: Test execution failed")
+                return False
 
-        # If all tests passed, notify and finish
-        if all_passed:
-            print("\n✓ All tests passed!")
-            step_notify_success()
-            return True
+            # If all tests passed, notify and finish
+            if all_passed:
+                print("\n✓ All tests passed!")
+                step_notify_success()
+                return True
+        skip_tests = False
 
-        # Step 2: Capture DOM
-        if not step_replicate(report_path):
-            print("\nPipeline stopped: DOM capture failed")
-            return False
+        # Step 2: Capture DOM (skip if failing line is same as previous attempt)
+        should_replicate = True
+        logs_dir = ROOT / "artifacts" / "rootcause_logs"
+        log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
+        if log_files:
+            current_error = extract_error_summary(log_files[-1])
+            history = json.loads(fix_history_path.read_text())
+            if history["attempts"]:
+                prev_error = history["attempts"][-1].get("error_after", "")
+                if current_error and prev_error and current_error == prev_error:
+                    print("\n[2/6] Skipping DOM capture — same failing line as previous attempt")
+                    should_replicate = False
+
+        if should_replicate:
+            if not step_replicate(report_path):
+                print("\nPipeline stopped: DOM capture failed")
+                return False
 
         # Step 3: Analyze
-        if not step_analyze(report_path):
+        if not step_analyze(report_path, fix_history_path):
             print("\nPipeline stopped: Analysis failed")
             return False
 
         # Step 4: Generate fix
-        if not step_generate_fix(report_path):
+        if not step_generate_fix(report_path, fix_history_path):
             print("\nPipeline stopped: Fix generation failed")
             return False
 
         # Step 5: Notify and get user action
         action = step_notify()
+
+        # If supervisor just intervened, send a note about it
+        if supervisor_just_ran:
+            from messaging.telegram_manager import TelegramManager
+            guidance_path = ROOT / "artifacts" / "strategy" / "guidance.json"
+            if guidance_path.exists():
+                try:
+                    guidance = json.loads(guidance_path.read_text())
+                    rewind_to = guidance.get("rewind_to_attempt", "?")
+                    analysis = guidance.get("analysis", "")
+                    TelegramManager().send_message(
+                        f"🔄 Supervisor intervened: rewound to attempt {rewind_to}.\n{analysis}"
+                    )
+                except (json.JSONDecodeError, OSError):
+                    pass
+            supervisor_just_ran = False
 
         if action == "terminate":
             print("\nPipeline stopped by user")
@@ -341,7 +571,43 @@ def run_pipeline():
             if not step_apply_fix(report_path):
                 print("\nPipeline stopped: Fix application failed")
                 return False
+
+            # Run tests after fix
             print("\nFix applied. Rerunning tests...")
+            success, all_passed = step_run_tests(report_path)
+            if not success:
+                record_attempt(fix_history_path, "failed", "Test execution failed")
+                print("\nPipeline stopped: Test execution failed")
+                return False
+
+            if all_passed:
+                record_attempt(fix_history_path, "passed")
+                print("\n✓ All tests passed after fix!")
+                step_notify_success()
+                return True
+
+            # Tests still failing — record attempt with error summary
+            logs_dir = ROOT / "artifacts" / "rootcause_logs"
+            log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
+            error_summary = extract_error_summary(log_files[-1]) if log_files else ""
+            record_attempt(fix_history_path, "failed", error_summary)
+
+            # Check if supervisor should intervene (every 3 failed attempts)
+            history = json.loads(fix_history_path.read_text())
+            attempt_count = len(history["attempts"])
+            if attempt_count > 0 and attempt_count % 8 == 0:
+                if not step_supervise(report_path, fix_history_path):
+                    print("\nPipeline stopped: Supervisor failed")
+                    return False
+
+                if not apply_supervisor_guidance(fix_history_path, report_path):
+                    print("\nSupervisor recommends escalation — stopping pipeline")
+                    return False
+
+                supervisor_just_ran = True
+
+            # Continue pipeline — skip tests since we just ran them
+            skip_tests = True
             continue
 
         # Unknown action

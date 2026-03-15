@@ -98,9 +98,10 @@ In Cypress, DOM is always accessed uniformly via `cy.get("body")`. There is no n
      Example: `/home/user/fix-pilot/artifacts/dom_snapshots/migration-wave_2026-03-12_18-08-58.html`
    - Create the directory: `mkdir -p <artifacts_dir>/dom_snapshots`
 
-4. Inject capture code BEFORE the failing line. **You MUST replace the outputPath value below with the actual absolute path you built in step 3:**
+4. Inject capture code BEFORE the failing line. **Copy this code block EXACTLY as-is. The ONLY thing you may change is the outputPath value. Do NOT add, remove, or modify any other lines. Do NOT add conditional logic, table waits, or any "improvements":**
    ```typescript
    // ===== INJECTED: Capture DOM before failure =====
+   cy.wait(10000);
    cy.get("body").then(($body) => {
      const outputPath = '/home/user/fix-pilot/artifacts/dom_snapshots/migration-wave_2026-03-12_18-08-58.html';
      const html = $body[0].outerHTML;
@@ -117,17 +118,19 @@ In Cypress, DOM is always accessed uniformly via `cy.get("body")`. There is no n
        }
      });
 
-     const snapshot = JSON.stringify({
-       mainDOM: html,
-       iframes: iframeContents.length > 0 ? iframeContents : null
-     }, null, 2);
+     const iframeSection = iframeContents.length > 0
+       ? '\n<!-- IFRAMES -->\n' + iframeContents.map(f => f.content || `<!-- iframe ${f.id}: ${f.error || 'no content'} -->`).join('\n')
+       : '';
 
-     cy.writeFile(outputPath, snapshot, 'utf-8');
+     cy.writeFile(outputPath, html + iframeSection, 'utf-8');
      cy.log('[TEST-REPLICATOR] DOM captured to: ' + outputPath);
    });
 
-   // Capture screenshot as backup
-   cy.screenshot('failure-capture', { capture: 'fullPage' });
+   // Zoom out and capture screenshot
+   cy.viewport(3840, 2160);
+   cy.document().then((doc) => { doc.body.style.zoom = '0.5'; });
+   cy.wait(1000);
+   cy.screenshot('failure-capture', { capture: 'viewport' });
 
    // Halt test — must be inside cy.then() so it runs AFTER the queued commands above
    cy.then(() => {
@@ -157,10 +160,15 @@ npm run e2e:run:local -- --headed --spec <your_test_file>
 
 The test will run normally, but when it reaches the injected code, it will capture the DOM, take a screenshot, and halt.
 
-### Step 5: Verify Capture
-Check that the DOM snapshot was created (use the absolute path):
+### Step 5: Verify Capture and Copy Screenshot
+Check that the DOM snapshot was created, then copy the screenshot to artifacts:
 ```bash
 ls -lh <artifacts_dir>/dom_snapshots/<component>_*.html
+```
+
+Copy the screenshot from the project's Cypress screenshots folder into `artifacts/dom_snapshots/` (`cy.screenshot()` can't save to an absolute path, so we copy it after the run):
+```bash
+cp $(find <project_path> -path "*/screenshots/*/failure-capture.png" -type f 2>/dev/null | head -1) <artifacts_dir>/dom_snapshots/<component>_<timestamp>.png
 ```
 
 ### Step 6: Restore Original File
