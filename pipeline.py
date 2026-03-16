@@ -16,6 +16,8 @@ import os
 import time
 import json
 import threading
+import shutil
+import random
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -179,6 +181,76 @@ def extract_error_summary(log_path: Path, max_chars: int = 200) -> str:
 # Helpers
 # =============================================================================
 
+def extract_test_name_from_command(command: str) -> str:
+    """Extract test name from EXECUTE_COMMAND for branch naming."""
+    import re
+
+    # Try to extract spec file from Cypress command (--spec "path/to/test.cy.ts")
+    spec_match = re.search(r'--spec\s+["\']?([^"\']+)["\']?', command)
+    if spec_match:
+        spec_path = spec_match.group(1)
+        # Get filename without extension (e.g., "my-test" from "cypress/e2e/my-test.cy.ts")
+        filename = Path(spec_path).stem
+        # Remove .cy suffix if present
+        if filename.endswith('.cy'):
+            filename = filename[:-3]
+        return filename
+
+    # Fallback: use last non-flag argument
+    parts = command.split()
+    for part in reversed(parts):
+        if not part.startswith('-') and '/' not in part and part not in ('npx', 'npm', 'yarn', 'run', 'test', 'cypress'):
+            return part
+
+    return "test"
+
+
+def sanitize_branch_name(name: str) -> str:
+    """Sanitize a string to be a valid git branch name."""
+    import re
+    # Replace spaces and invalid chars with hyphens
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '-', name)
+    # Remove consecutive hyphens
+    sanitized = re.sub(r'-+', '-', sanitized)
+    # Remove leading/trailing hyphens
+    sanitized = sanitized.strip('-')
+    return sanitized.lower() or "test"
+
+
+def create_fix_branch() -> str:
+    """Create a new branch for this fix attempt. Returns branch name or empty string on failure."""
+    project_path = os.getenv("PROJECT_PATH")
+    if not project_path:
+        print("  ERROR: PROJECT_PATH not set")
+        return ""
+
+    # Extract test name from command
+    execute_command = os.getenv("EXECUTE_COMMAND", "")
+    test_name = extract_test_name_from_command(execute_command)
+    test_name = sanitize_branch_name(test_name)
+
+    # Generate branch name with random 8 digits
+    random_suffix = str(random.randint(10000000, 99999999))
+    branch_name = f"{test_name}-fix-{random_suffix}"
+
+    try:
+        # Create and checkout new branch
+        result = subprocess.run(
+            ["git", "-C", project_path, "checkout", "-b", branch_name],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            print(f"  ERROR: Failed to create branch: {result.stderr}")
+            return ""
+
+        print(f"  Created branch: {branch_name}")
+        return branch_name
+
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  ERROR: {e}")
+        return ""
+
+
 def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, report_path: Path = None, fix_history_path: Path = None) -> bool:
     """
     Run a Claude skill and return success/failure.
@@ -222,6 +294,7 @@ def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, repo
         "claude",
         "--print",
         "--dangerously-skip-permissions",
+        "--model", "claude-opus-4-5",
         "--add-dir", str(ROOT),
     ]
 
@@ -270,6 +343,44 @@ def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, repo
             stop_event.set()
         if tail_thread:
             tail_thread.join(timeout=2)
+
+
+# =============================================================================
+# Artifact Archiving
+# =============================================================================
+
+def archive_run_artifacts(session_name: str):
+    """Archive artifacts from the current run into a timestamped folder."""
+    artifacts_dir = ROOT / "artifacts"
+    archive_base = ROOT / "previous_artifacts"
+    archive_base.mkdir(parents=True, exist_ok=True)
+
+    # Create archive folder for this run
+    run_archive = archive_base / session_name
+    run_archive.mkdir(exist_ok=True)
+
+    # Items to archive from this run
+    items_to_archive = [
+        "run_reports",
+        "hints",
+        "bug_fixes",
+        "rootcause_logs",
+        "strategy",
+        "suggestions",
+        "fix_history.json",
+        "dom_snapshots",
+    ]
+
+    for item in items_to_archive:
+        src = artifacts_dir / item
+        if src.exists():
+            dst = run_archive / item
+            if src.is_file():
+                shutil.copy2(src, dst)
+            else:
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+
+    print(f"Archived artifacts to: {run_archive}")
 
 
 # =============================================================================
@@ -391,6 +502,12 @@ def step_apply_fix(report_path: Path = None) -> bool:
     return run_claude_skill("fix-applier", timeout=3600, report_path=report_path)
 
 
+def step_commit_fixes(report_path: Path = None) -> bool:
+    """Commit all fixes using commit-fixes skill."""
+    print("\nCommitting fixes...")
+    return run_claude_skill("commit-fixes", timeout=600, report_path=report_path)
+
+
 def step_supervise(report_path: Path = None, fix_history_path: Path = None) -> bool:
     """Run the fix supervisor to analyze failure patterns and redirect."""
     print("\n[SUPERVISOR] Analyzing fix history...")
@@ -476,6 +593,13 @@ def run_pipeline():
     print("RootCause AI Pipeline")
     print("=" * 50)
 
+    # Create a new branch for this fix attempt
+    print("\nCreating fix branch...")
+    branch_name = create_fix_branch()
+    if not branch_name:
+        print("Pipeline stopped: Could not create fix branch")
+        return False
+
     report_path = create_run_report()
     print(f"Run report: {report_path}")
 
@@ -500,9 +624,10 @@ def run_pipeline():
                 print("\nPipeline stopped: Test execution failed")
                 return False
 
-            # If all tests passed, notify and finish
+            # If all tests passed on first run, no fixes needed
             if all_passed:
                 print("\n✓ All tests passed!")
+                archive_run_artifacts(session_name)
                 step_notify_success()
                 return True
         skip_tests = False
@@ -583,6 +708,8 @@ def run_pipeline():
             if all_passed:
                 record_attempt(fix_history_path, "passed")
                 print("\n✓ All tests passed after fix!")
+                step_commit_fixes(report_path)
+                archive_run_artifacts(session_name)
                 step_notify_success()
                 return True
 
