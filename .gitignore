@@ -1,5 +1,6 @@
 # Artifacts (generated logs, fixes, hints)
 artifacts/
+previous_artifacts/
 
 # Environment variables (secrets)
 .env
@@ -10,3 +11,5 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+tmp.txt
+pr-draft.md

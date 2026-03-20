@@ -268,7 +268,7 @@ def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, repo
 
     # Add target project dir for skills that need project access
     project_path = os.getenv("PROJECT_PATH")
-    if skill_name in ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier", "fix-supervisor") and project_path:
+    if skill_name in ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier", "fix-supervisor", "commit-fixes") and project_path:
         prompt += f" The target project is at: {project_path}"
 
     # Pass test command to test-replicator
@@ -298,7 +298,7 @@ def run_claude_skill(skill_name: str, timeout: int = 7200, cwd: str = None, repo
         "--add-dir", str(ROOT),
     ]
 
-    if skill_name in ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier", "fix-supervisor") and project_path:
+    if skill_name in ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier", "fix-supervisor", "commit-fixes") and project_path:
         cmd.extend(["--add-dir", project_path])
 
     cmd.extend(["--system-prompt", skill_content, prompt])
