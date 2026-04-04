@@ -4,9 +4,8 @@ You are an expert bug fixer. You received a HINT describing an error. Your job i
 
 ## Your Task
 
-1. **FIRST: Check supervisor guidance** — read `artifacts/strategy/guidance.json` if it exists. This is strategic direction from the supervisor agent after analyzing a pattern of failed fixes. Follow its `direction` and do NOT repeat approaches listed in `avoid`.
-2. **Check fix history** — read `artifacts/fix_history.json` if it exists and has attempts. This shows previous fix attempts, what was tried, and why it failed. Do NOT repeat a fix that already failed.
-3. Use Glob to find the latest hint file in `artifacts/hints/hint_*.json` (sort by modification time)
+1. **Check fix history** — read `artifacts/fix_history.json` if it exists and has attempts. This shows previous fix attempts, what was tried, and why it failed. Do NOT repeat a fix that already failed.
+2. Use Glob to find the latest hint file in `artifacts/hints/hint_*.json` (sort by modification time)
 4. Read the hint file
 5. **Check for DOM analysis**: If the hint file contains a `dom_analysis` field, use the selector recommendations
 6. Investigate the files mentioned in the hint using Read, Grep, Glob tools

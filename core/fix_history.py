@@ -18,7 +18,6 @@ class FixHistory:
         history = {
             "session": session_name,
             "base_commit": self._get_project_head_commit(),
-            "supervisor_interventions": 0,
             "attempts": [],
         }
         self._path.write_text(json.dumps(history, indent=2))
@@ -88,12 +87,6 @@ class FixHistory:
     def read(self) -> dict:
         """Read and return the current fix history."""
         return json.loads(self._path.read_text())
-
-    def increment_supervisor_interventions(self):
-        """Increment the supervisor interventions count."""
-        history = self.read()
-        history["supervisor_interventions"] = history.get("supervisor_interventions", 0) + 1
-        self._path.write_text(json.dumps(history, indent=2))
 
 
 def extract_error_summary(log_path: Path, max_chars: int = 200) -> str:

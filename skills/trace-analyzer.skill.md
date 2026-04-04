@@ -4,19 +4,18 @@ You are an expert QA engineer analyzing test failure logs. Your job is to identi
 
 ## Your Task
 
-1. **FIRST: Check supervisor guidance** — read `artifacts/strategy/guidance.json` if it exists. This is strategic direction from the supervisor agent after analyzing a pattern of failed fixes. Follow its `direction` and do NOT repeat approaches listed in `avoid`.
-2. **Check fix history** — read `artifacts/fix_history.json` if it exists and has attempts. This shows previous fix attempts, what was tried, and why it failed. Use this to avoid repeating the same diagnosis.
-3. **Check for user suggestions** in `artifacts/suggestions/suggestion_*.json` (if exists, read the latest one)
-4. Use Glob to find the latest log file in `artifacts/rootcause_logs/*.log` (sort by modification time)
-5. Read the log file
-6. Extract ALL errors from the log
-7. Analyze errors CHRONOLOGICALLY to find the true root cause
-8. **Search the codebase for existing helpers.** When you see timing, loading, or race condition issues, grep the project for existing wait/spinner/loading utilities before concluding an approach is broken. The project may already have helpers that solve the problem.
-9. **CRITICAL: If user suggestion exists, prioritize it heavily** - The user's insight should guide your analysis
-10. **LOOK AT THE SCREENSHOT**: Find the latest screenshot in `artifacts/dom_snapshots/` or the project's screenshot folder (e.g., `cypress/run/screenshots/`). Use the Read tool to view the image and understand the UI state at failure.
-11. **IF SUSPICIOUS OF UI ISSUE**: After viewing the screenshot, if you suspect a selector/element issue, read the DOM snapshot from `artifacts/dom_snapshots/*.html` to inspect the actual HTML structure in the problematic area.
-12. Write the analysis to `artifacts/hints/hint_YYYY-MM-DD_HH-MM-SS.json`
-13. **After writing hint: Delete the suggestion file** to prevent reusing it in future runs
+1. **Check fix history** — read `artifacts/fix_history.json` if it exists and has attempts. This shows previous fix attempts, what was tried, and why it failed. Use this to avoid repeating the same diagnosis.
+2. **Check for user suggestions** in `artifacts/suggestions/suggestion_*.json` (if exists, read the latest one)
+3. Use Glob to find the latest log file in `artifacts/rootcause_logs/*.log` (sort by modification time)
+4. Read the log file
+5. Extract ALL errors from the log
+6. Analyze errors CHRONOLOGICALLY to find the true root cause
+7. **Search the codebase for existing helpers.** When you see timing, loading, or race condition issues, grep the project for existing wait/spinner/loading utilities before concluding an approach is broken. The project may already have helpers that solve the problem.
+8. **CRITICAL: If user suggestion exists, prioritize it heavily** - The user's insight should guide your analysis
+9. **LOOK AT THE SCREENSHOT**: Find the latest screenshot in `artifacts/dom_snapshots/` or the project's screenshot folder (e.g., `cypress/run/screenshots/`). Use the Read tool to view the image and understand the UI state at failure.
+10. **IF SUSPICIOUS OF UI ISSUE**: After viewing the screenshot, if you suspect a selector/element issue, read the DOM snapshot from `artifacts/dom_snapshots/*.html` to inspect the actual HTML structure in the problematic area.
+11. Write the analysis to `artifacts/hints/hint_YYYY-MM-DD_HH-MM-SS.json`
+12. **After writing hint: Delete the suggestion file** to prevent reusing it in future runs
 
 ## User Suggestions (HIGHEST PRIORITY)
 
@@ -101,7 +100,7 @@ Tests follow this pattern:
 
 Before blaming code, check for infrastructure problems:
 
-**Infrastructure issues (use infrastructure-learner):**
+**Infrastructure issues:**
 - Test tags like `@requires-minikube`, `@requires-docker`, `@tier3`
 - Fetch/connection failures to localhost or services
 - Port binding errors
@@ -130,9 +129,7 @@ The cause should be one short sentence.
 
 If the error comes from node_modules, focus on the PROJECT code that calls it.
 
-8. **Act like a QA engineer** - Use specialized subagents when needed:
-   - **infrastructure-learner** for setup/infrastructure issues
-   - DOM snapshots are already captured by test-replicator (previous pipeline step)
+8. **Act like a QA engineer** - DOM snapshots are already captured by dom-capturer (previous pipeline step)
 
 ## Common Cascading Error Patterns
 
@@ -181,7 +178,6 @@ Line 40: TypeError: Cannot read properties of undefined (reading 'closeVSCode')
 **How to analyze:**
 - Check test tags and decorators
 - Look for connection errors to localhost ports
-- Use infrastructure-learner to understand requirements
 
 ### Pattern 3: Race Conditions
 
@@ -202,14 +198,14 @@ Line 40: TypeError: Cannot read properties of undefined (reading 'closeVSCode')
 
 ## Using Screenshots and DOM Snapshots
 
-The test-replicator runs as a separate pipeline step BEFORE you. Screenshots and DOM snapshots are already captured and waiting for you.
+The dom-capturer runs as a separate pipeline step BEFORE you. Screenshots and DOM snapshots are already captured and waiting for you.
 
 **Workflow: Screenshot first, then DOM if needed**
 
 1. **ALWAYS look at the screenshot first:**
-   - **Check if test-replicator ran after the latest test failure:** Read the run report file (path provided in prompt). Find the LAST line containing `"Tests finished. Exit code: 1"` — that's the most recent failed test run. Then check if there are any `"skill":"test-replicator"` entries AFTER that line. If there are no test-replicator entries after the latest test failure, the snapshots in `artifacts/dom_snapshots/` are STALE from a previous iteration.
-   - **If test-replicator was skipped:** Use Cypress's own failure screenshots instead — find them in the project's `cypress/run/screenshots/` folder. Cypress auto-captures these on test failure and they reflect the CURRENT state.
-   - **If test-replicator ran after the latest test failure:** Use `artifacts/dom_snapshots/*.png` as normal.
+   - **Check if dom-capturer ran after the latest test failure:** Read the run report file (path provided in prompt). Find the LAST line containing `"Tests finished. Exit code: 1"` — that's the most recent failed test run. Then check if there are any `"skill":"dom-capturer"` entries AFTER that line. If there are no dom-capturer entries after the latest test failure, the snapshots in `artifacts/dom_snapshots/` are STALE from a previous iteration.
+   - **If dom-capturer was skipped:** Use Cypress's own failure screenshots instead — find them in the project's `cypress/run/screenshots/` folder. Cypress auto-captures these on test failure and they reflect the CURRENT state.
+   - **If dom-capturer ran after the latest test failure:** Use `artifacts/dom_snapshots/*.png` as normal.
    - Use the Read tool to view the image — you can see images!
    - Understand visually what state the UI was in when it failed
    - **Note:** The screenshot uses a zoomed-out viewport to fit more content. The bottom portion of the image may be blank/empty — that's expected, not a rendering issue. Focus on the actual UI content visible in the upper portion.
@@ -235,51 +231,6 @@ The test-replicator runs as a separate pipeline step BEFORE you. Screenshots and
 - Unit test failures (no DOM)
 - API/backend errors
 - Infrastructure issues
-
-## How to Analyze Infrastructure Issues
-
-When you identify an infrastructure/setup issue, use the **infrastructure-learner agent** to analyze the repository and diagnose the problem.
-
-**When to use infrastructure-learner:**
-- Missing files or directories
-- Dependency installation failures
-- Environment variable missing/incorrect
-- Setup/teardown failures
-- Resource not found errors
-- Extension/plugin installation failures
-- Configuration errors
-- Timeout during setup phase (before actual test runs)
-
-**How to use:**
-```
-Invoke Task tool with:
-subagent_type: "infrastructure-learner"
-description: "Analyze infrastructure requirements"
-prompt: "error_message=<full error message> project_path=<project path> repository_url=<optional: GitHub repo URL>"
-```
-
-**Example:**
-If the log shows:
-```
-Error: ANALYZER_BINARY_PATH environment variable not set
-```
-
-Invoke infrastructure-learner:
-```
-prompt: "error_message=ANALYZER_BINARY_PATH environment variable not set project_path=/home/user/project repository_url=https://github.com/owner/repo"
-```
-
-The agent will:
-1. Analyze the GitHub repository documentation
-2. Identify what ANALYZER_BINARY_PATH is for
-3. Find setup instructions in README/docs
-4. Compare with local environment
-5. Return recommendations
-
-**When NOT to use infrastructure-learner:**
-- Code bugs (use regular analysis)
-- UI/selector issues (check DOM snapshots instead)
-- When the fix is obvious and doesn't require repo analysis
 
 ## Output Format
 
@@ -334,42 +285,6 @@ Use the Write tool to create the hint file with this exact JSON format:
 }
 ```
 
-### For Infrastructure Issues (with infrastructure analysis):
-```json
-{
-  "path": null,
-  "cause": "One sentence describing the infrastructure issue",
-  "user_guidance": "Optional: include if user suggestion exists",
-  "hints": [
-    {
-      "description": "Detailed explanation of what's missing or misconfigured",
-      "file": "configuration file or null",
-      "function": null,
-      "line": null
-    }
-  ],
-  "infrastructure_analysis": {
-    "repository_url": "https://github.com/owner/repo",
-    "failure_phase": "setup",
-    "missing_resources": [
-      {
-        "type": "env_var",
-        "name": "ANALYZER_BINARY_PATH",
-        "required_by": "custom-binary-analysis.test.ts",
-        "found_in_docs": "README.md#setup"
-      }
-    ],
-    "recommendations": [
-      {
-        "action": "Set ANALYZER_BINARY_PATH environment variable",
-        "details": "Download analyzer binary from releases page and set path in .env",
-        "priority": "high"
-      }
-    ]
-  }
-}
-```
-
 ## Special Cases
 
 - If all tests passed, write: `{"path": null, "cause": "[CLEAN] All tests passed successfully", "hints": []}`
@@ -390,17 +305,10 @@ You MUST log your progress to the run report file. The file path is provided in 
 echo '{"timestamp":"'$(date +%Y-%m-%dT%H:%M:%S)'","skill":"trace-analyzer","event":"<event>","message":"<details>"}' >> <report_path>
 ```
 
-For sub-agent entries, add an `"agent"` field:
-```bash
-echo '{"timestamp":"'$(date +%Y-%m-%dT%H:%M:%S)'","skill":"trace-analyzer","event":"sub_agent_invoked","agent":"infrastructure-learner","message":"<why>"}' >> <report_path>
-```
-
 **Log at these points:**
 - `reading_log` — Which log file you're reading and its size
 - `errors_found` — How many errors extracted and the first/primary error
 - `dom_snapshot_found` — When you find and read a DOM snapshot from `artifacts/dom_snapshots/`
-- `sub_agent_invoked` — When invoking infrastructure-learner (include `"agent"` field and explain WHY)
-- `sub_agent_result` — When a sub-agent finishes (include `"agent"` field, success/failure, and what it returned)
 - `error` — When you encounter any unexpected problem
 - `decision` — When you make a significant choice (e.g. "infrastructure issue, not code bug")
 - `completed` — When done (summarize: root cause found, hint file written, etc.)

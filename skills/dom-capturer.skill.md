@@ -1,4 +1,4 @@
-# Test Replicator Agent
+# DOM Capturer Skill
 
 You are an autonomous agent that captures DOM state at the exact point where a test fails.
 
@@ -85,7 +85,7 @@ In Cypress, DOM is always accessed uniformly via `cy.get("body")`. There is no n
 
 1. Create a backup of the file you're modifying:
    ```bash
-   cp /path/to/failing_file.ts /tmp/test-replicator-backup-TIMESTAMP.ts
+   cp /path/to/failing_file.ts /tmp/dom-capturer-backup-TIMESTAMP.ts
    ```
 
 2. Read the original file content
@@ -123,18 +123,12 @@ In Cypress, DOM is always accessed uniformly via `cy.get("body")`. There is no n
        : '';
 
      cy.writeFile(outputPath, html + iframeSection, 'utf-8');
-     cy.log('[TEST-REPLICATOR] DOM captured to: ' + outputPath);
+     cy.log('[DOM-CAPTURER] DOM captured to: ' + outputPath);
    });
 
-   // Zoom out and capture screenshot
-   cy.viewport(3840, 2160);
-   cy.document().then((doc) => { doc.body.style.zoom = '0.5'; });
-   cy.wait(1000);
-   cy.screenshot('failure-capture', { capture: 'viewport' });
-
-   // Halt test — must be inside cy.then() so it runs AFTER the queued commands above
+   // Halt test
    cy.then(() => {
-     throw new Error('[TEST-REPLICATOR] DOM captured, halting test.');
+     throw new Error('[DOM-CAPTURER] DOM captured, halting test.');
    });
    // ===== END INJECTION =====
    ```
@@ -158,24 +152,19 @@ npm run e2e:run:local -- --headed --spec <your_test_file>
 
 **Fallback:** If `execute_command` is not provided, use `npx cypress run --spec <test_file> --headed`.
 
-The test will run normally, but when it reaches the injected code, it will capture the DOM, take a screenshot, and halt.
+The test will run normally, but when it reaches the injected code, it will capture the DOM and halt.
 
-### Step 5: Verify Capture and Copy Screenshot
-Check that the DOM snapshot was created, then copy the screenshot to artifacts:
+### Step 5: Verify DOM Capture
+Check that the DOM snapshot was created:
 ```bash
 ls -lh <artifacts_dir>/dom_snapshots/<component>_*.html
-```
-
-Copy the screenshot from the project's Cypress screenshots folder into `artifacts/dom_snapshots/` (`cy.screenshot()` can't save to an absolute path, so we copy it after the run):
-```bash
-cp $(find <project_path> -path "*/screenshots/*/failure-capture.png" -type f 2>/dev/null | head -1) <artifacts_dir>/dom_snapshots/<component>_<timestamp>.png
 ```
 
 ### Step 6: Restore Original File
 Restore the file from backup:
 ```bash
-cp /tmp/test-replicator-backup-TIMESTAMP.ts /path/to/failing_file.ts
-rm /tmp/test-replicator-backup-TIMESTAMP.ts
+cp /tmp/dom-capturer-backup-TIMESTAMP.ts /path/to/failing_file.ts
+rm /tmp/dom-capturer-backup-TIMESTAMP.ts
 ```
 
 **CRITICAL:** Always restore the original file, even if capture failed. Use try-finally pattern in your execution.
@@ -188,7 +177,6 @@ At the end of your execution, clearly state the results:
 DOM Capture Complete!
 
 DOM Snapshot: <artifacts_dir>/dom_snapshots/<component>_<timestamp>.html
-Screenshot: ./cypress/screenshots/failure-capture.png
 Capture Method: cy.get("body") + cy.writeFile
 Format: JSON with main DOM + iframes
 File Restored: Yes
@@ -218,7 +206,7 @@ Credentials.openList(100);
 // INJECT CAPTURE HERE (before line 45)
 // Line 45 - FAILING: cy.get('td[data-label="Name"]').contains(credentialName);
 ```
-**Injection:** Insert `cy.get("body").then(...)` + `cy.screenshot(...)` + `cy.then(() => throw)` before line 45.
+**Injection:** Insert `cy.get("body").then(...)` + `cy.then(() => throw)` before line 45.
 
 ### Example 2: Selector in model (page object)
 ```typescript
@@ -241,7 +229,6 @@ cy.get(commonView.appTable).find(trTag)
 ## Error Handling
 
 If capture fails:
-- Fall back to screenshot only (`cy.screenshot()`)
 - Return partial results
 - Log what went wrong
 - Don't fail completely - partial info is better than none
@@ -263,8 +250,6 @@ All captures go to:
 ```
 <artifacts_dir>/dom_snapshots/
 └── <component>_2026-01-24_17-30-00.html  (DOM snapshot - JSON format)
-./cypress/screenshots/
-└── failure-capture.png                    (Screenshot backup)
 ```
 
 **DOM Snapshot Format:**
@@ -290,14 +275,12 @@ This captures the main DOM plus any iframes at a single level (standard web apps
 2. **Always cleanup** - Restore the original file even if capture fails
 3. **Use `cy.then(() => throw)` to halt** - NOT bare `throw` (which would execute before Cypress commands run)
 4. **Timestamp uniqueness** - Use timestamp to avoid file conflicts
-5. **Screenshot** - Use `cy.screenshot('name', { capture: 'fullPage' })`
-6. **Error tolerance** - If DOM capture fails, still try screenshot
-7. **No `fs` imports needed** - Use `cy.writeFile()` instead
+5. **No `fs` imports needed** - Use `cy.writeFile()` instead
 8. **Component naming** - Output file must be named `<component>_<timestamp>.html`, NOT `failure-capture-<timestamp>.html`
 
 ## Limitations
 
-- Can only capture what Cypress can access (DOM, screenshots)
+- Can only capture what Cypress can access (DOM)
 - Can't capture state DURING an action (only before)
 - Assumes test can reach the failure point again consistently
 - May not work if test has randomness/race conditions

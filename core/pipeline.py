@@ -34,8 +34,13 @@ class Pipeline:
         self.fix_history: FixHistory = None
         self.skill_runner: SkillRunner = None
 
-    def run(self) -> bool:
-        """Run the full pipeline with loop support."""
+    def run(self, autofix: bool = False) -> bool:
+        """Run the full pipeline with loop support.
+
+        Args:
+            autofix: If True, skip Telegram approvals and auto-apply fixes.
+        """
+        self._autofix = autofix
         print("=" * 50)
         print("RootCause AI Pipeline")
         print("=" * 50)
@@ -58,14 +63,18 @@ class Pipeline:
 
         self.skill_runner = SkillRunner(self._root_dir, self._skills_dir)
 
-        # Clear stale supervisor guidance from previous runs
-        guidance_path = self._artifacts_dir / "strategy" / "guidance.json"
-        if guidance_path.exists():
-            guidance_path.unlink()
-            print("Cleared stale supervisor guidance")
+        # Commentator diary (isolated from other skills)
+        self._commentator_diary_dir = self._artifacts_dir / "commentator_diary"
+        self._commentator_diary_dir.mkdir(parents=True, exist_ok=True)
+        self._commentator_diary_path = self._commentator_diary_dir / "diary.json"
+
+        # Cleaner tracking file
+        self._cleaner_tracking_dir = self._artifacts_dir / "cleaner"
+        self._cleaner_tracking_dir.mkdir(parents=True, exist_ok=True)
+        self._cleaner_tracking_path = self._cleaner_tracking_dir / "tracking.json"
 
         skip_tests = False
-        supervisor_just_ran = False
+        fix_attempted = False  # Track if a fix has been attempted
 
         while True:
             # Step 1: Run tests (skipped if we just ran them in fix_and_rerun)
@@ -78,27 +87,17 @@ class Pipeline:
                 # If all tests passed on first run, no fixes needed
                 if all_passed:
                     print("\n✓ All tests passed!")
-                    self._step_notify_success()
+                    if not self._autofix:
+                        self._step_notify_success()
                     return True
             skip_tests = False
 
-            # Step 2: Capture DOM (skip if failing line is same as previous attempt)
-            should_replicate = True
-            logs_dir = self._artifacts_dir / "rootcause_logs"
-            log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
-            if log_files:
-                current_error = extract_error_summary(log_files[-1])
-                history = self.fix_history.read()
-                if history["attempts"]:
-                    prev_error = history["attempts"][-1].get("error_after", "")
-                    if current_error and prev_error and current_error == prev_error:
-                        print("\n[2/6] Skipping DOM capture — same failing line as previous attempt")
-                        should_replicate = False
-
-            if should_replicate:
-                if not self._step_replicate():
-                    print("\nPipeline stopped: DOM capture failed")
-                    return False
+            # Step 2: Copy screenshot, then capture DOM
+            self._copy_screenshot()
+            if not self._step_replicate():
+                print("\nPipeline stopped: DOM capture failed")
+                return False
+            self._rename_screenshot_to_match_dom()
 
             # Step 3: Analyze
             if not self._step_analyze():
@@ -110,25 +109,23 @@ class Pipeline:
                 print("\nPipeline stopped: Fix generation failed")
                 return False
 
-            # Step 5: Notify and get user action
-            action = self._step_notify()
+            # Step 5: Notify and get user action (skip if autofix)
+            if self._autofix:
+                action = "fix_and_rerun"
+            else:
+                action = self._step_notify()
 
-            # If supervisor just intervened, send a note about it
-            if supervisor_just_ran:
-                self._notify_supervisor_intervention()
-                supervisor_just_ran = False
+                if action == "terminate":
+                    print("\nPipeline stopped by user")
+                    return True
 
-            if action == "terminate":
-                print("\nPipeline stopped by user")
-                return True
+                if action == "rerun":
+                    print("\nRerunning tests...")
+                    continue
 
-            if action == "rerun":
-                print("\nRerunning tests...")
-                continue
-
-            if action == "suggest":
-                print("\nRe-analyzing with user suggestion...")
-                continue
+                if action == "suggest":
+                    print("\nRe-analyzing with user suggestion...")
+                    continue
 
             if action == "fix_and_rerun":
                 # Step 6: Apply fix
@@ -136,9 +133,14 @@ class Pipeline:
                     print("\nPipeline stopped: Fix application failed")
                     return False
 
+                fix_attempted = True  # Mark that a fix has been attempted
+
                 # Run tests after fix
                 print("\nFix applied. Rerunning tests...")
                 success, all_passed = self._step_run_tests()
+
+                # Commentator observes after tests (only after fix was attempted)
+                self._step_commentator()
                 if not success:
                     self.fix_history.record_attempt("failed", "Test execution failed")
                     print("\nPipeline stopped: Test execution failed")
@@ -147,8 +149,22 @@ class Pipeline:
                 if all_passed:
                     self.fix_history.record_attempt("passed")
                     print("\n✓ All tests passed after fix!")
+
+                    # Run cleaner loop
+                    if not self._run_cleaner_loop():
+                        print("\nPipeline stopped: Cleaner loop failed")
+                        return False
+
+                    # Analyze impact - find all tests that might be affected
+                    self._step_impact_analysis()
+
                     self._step_commit_fixes()
-                    self._step_notify_success()
+
+                    # Senior review loop - refactor if needed
+                    self._run_senior_review_loop()
+
+                    if not self._autofix:
+                        self._step_notify_success()
                     return True
 
                 # Tests still failing — record attempt with error summary
@@ -156,20 +172,6 @@ class Pipeline:
                 log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
                 error_summary = extract_error_summary(log_files[-1]) if log_files else ""
                 self.fix_history.record_attempt("failed", error_summary)
-
-                # Check if supervisor should intervene (every 8 failed attempts)
-                history = self.fix_history.read()
-                attempt_count = len(history["attempts"])
-                if attempt_count > 0 and attempt_count % 8 == 0:
-                    if not self._step_supervise():
-                        print("\nPipeline stopped: Supervisor failed")
-                        return False
-
-                    if not self._apply_supervisor_guidance():
-                        print("\nSupervisor recommends escalation — stopping pipeline")
-                        return False
-
-                    supervisor_just_ran = True
 
                 # Continue pipeline — skip tests since we just ran them
                 skip_tests = True
@@ -215,10 +217,35 @@ class Pipeline:
                 self.report.log("pipeline", "error", f"Test execution error: {e}")
             return False, False
 
+    def _copy_screenshot(self):
+        """Copy Cypress screenshot to artifacts before DOM capture."""
+        project_path = os.getenv("PROJECT_PATH")
+        if not project_path:
+            return
+        script = self._root_dir / "scripts" / "copy_cypress_screenshot.sh"
+        try:
+            subprocess.run(
+                [str(script), project_path, str(self._artifacts_dir)],
+                capture_output=True, text=True, timeout=30
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    def _rename_screenshot_to_match_dom(self):
+        """Rename screenshot to match DOM snapshot filename."""
+        script = self._root_dir / "scripts" / "rename_screenshot_to_match_dom.sh"
+        try:
+            subprocess.run(
+                [str(script), str(self._artifacts_dir)],
+                capture_output=True, text=True, timeout=30
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
     def _step_replicate(self) -> bool:
-        """Capture DOM at failure point using test-replicator skill."""
+        """Capture DOM at failure point using dom-capturer skill."""
         print("\n[2/6] Capturing DOM...")
-        return self.skill_runner.run("test-replicator", timeout=3600, report=self.report)
+        return self.skill_runner.run("dom-capturer", timeout=3600, report=self.report)
 
     def _step_analyze(self) -> bool:
         """Analyze test failure using trace-analyzer skill."""
@@ -290,14 +317,180 @@ class Pipeline:
         return self.skill_runner.run("fix-applier", timeout=3600, report=self.report)
 
     def _step_commit_fixes(self) -> bool:
-        """Commit all fixes using commit-fixes skill."""
+        """Commit all fixes using fix-committer skill."""
         print("\nCommitting fixes...")
-        return self.skill_runner.run("commit-fixes", timeout=600, report=self.report)
+        return self.skill_runner.run("fix-committer", timeout=600, report=self.report)
 
-    def _step_supervise(self) -> bool:
-        """Run the fix supervisor to analyze failure patterns and redirect."""
-        print("\n[SUPERVISOR] Analyzing fix history...")
-        return self.skill_runner.run("fix-supervisor", timeout=3600, report=self.report, fix_history=self.fix_history)
+    def _step_commentator(self) -> bool:
+        """Run commentator to observe and document in its private diary."""
+        print("\n[Commentator] Observing...")
+        return self.skill_runner.run(
+            "commentator",
+            timeout=300,
+            report=self.report,
+            fix_history=self.fix_history,
+            diary_path=self._commentator_diary_path
+        )
+
+    def _step_cleaner(self) -> bool:
+        """Run cleaner to remove unnecessary code from failed attempts."""
+        print("\n[Cleaner] Cleaning...")
+        return self.skill_runner.run(
+            "cleaner",
+            timeout=600,
+            report=self.report,
+            fix_history=self.fix_history,
+            diary_path=self._commentator_diary_path,
+            tracking_path=self._cleaner_tracking_path
+        )
+
+    def _run_cleaner_loop(self) -> bool:
+        """Run cleaner loop: clean, test, restore if needed, repeat until pass."""
+        print("\n[Cleaner] Starting cleanup loop...")
+
+        while True:
+            # Run cleaner
+            if not self._step_cleaner():
+                print("  Cleaner failed")
+                return False
+
+            # Run tests
+            success, all_passed = self._step_run_tests()
+            if not success:
+                print("  Test execution failed during cleanup")
+                return False
+
+            if all_passed:
+                print("  ✓ Tests still pass after cleanup")
+                self._step_commit_cleanup()
+                self._step_notify_cleanup_done()
+                return True
+
+            # Tests failed - cleaner will restore on next iteration
+            print("  Tests failed after cleanup, cleaner will restore...")
+
+    def _step_commit_cleanup(self) -> bool:
+        """Commit cleanup changes."""
+        print("\n[Cleaner] Committing cleanup...")
+        return self.skill_runner.run("fix-committer", timeout=600, report=self.report)
+
+    def _step_notify_cleanup_done(self):
+        """Send Telegram notification that cleanup is done."""
+        print("\nNotifying user: Cleanup complete!")
+
+        from messaging.telegram_manager import TelegramManager
+
+        tm = TelegramManager()
+        if self._autofix:
+            tm.send_message("✅ Autofix complete! Tests pass, cleanup done, changes committed.")
+        else:
+            tm.send_message("🧹 Cleanup complete! Unnecessary code removed and committed.")
+
+    def _step_impact_analysis(self) -> bool:
+        """Analyze which tests might be affected by the changes."""
+        print("\n[Impact] Analyzing affected tests...")
+        return self.skill_runner.run(
+            "impact-analyzer",
+            timeout=600,
+            report=self.report,
+            fix_history=self.fix_history
+        )
+
+    def _step_senior_review(self) -> bool:
+        """Run senior reviewer to check fix quality."""
+        print("\n[Senior] Reviewing fix...")
+        return self.skill_runner.run(
+            "senior-reviewer",
+            timeout=900,
+            report=self.report
+        )
+
+    def _run_senior_review_loop(self):
+        """Run senior review loop: review, refactor if needed, test, repeat."""
+        print("\n[Senior] Starting review loop...")
+
+        project_path = os.getenv("PROJECT_PATH")
+        if not project_path:
+            print("  ERROR: PROJECT_PATH not set")
+            return
+
+        # Save safe commit to revert to if refactoring breaks tests
+        safe_commit = self._get_head_commit(project_path)
+        max_iterations = 3
+
+        for iteration in range(max_iterations):
+            print(f"\n[Senior] Review iteration {iteration + 1}/{max_iterations}")
+
+            # Run senior reviewer
+            if not self._step_senior_review():
+                print("  Senior review failed")
+                return
+
+            # Read decision from artifact
+            review_file = self._artifacts_dir / "senior_review.json"
+            if not review_file.exists():
+                print("  No review file produced, assuming approved")
+                return
+
+            review = json.loads(review_file.read_text())
+            decision = review.get("decision", "approved")
+
+            if decision == "approved":
+                print("  ✓ Fix approved by senior reviewer")
+                return
+
+            if decision == "stopped":
+                print("  Senior reviewer stopped: " + review.get("reason", ""))
+                # Reset to safe commit if we made any changes
+                if iteration > 0:
+                    self._reset_to_commit(project_path, safe_commit)
+                return
+
+            if decision == "refactoring":
+                print("  Refactoring applied, running tests...")
+
+                # Run tests
+                success, all_passed = self._step_run_tests()
+                if not success:
+                    print("  Test execution failed, reverting...")
+                    self._reset_to_commit(project_path, safe_commit)
+                    return
+
+                if all_passed:
+                    print("  ✓ Tests pass after refactoring")
+                    self._step_commit_fixes()
+                    safe_commit = self._get_head_commit(project_path)
+                    # Continue loop for more review
+                else:
+                    print("  Tests failed after refactoring, reverting...")
+                    self._reset_to_commit(project_path, safe_commit)
+                    # Continue loop - reviewer will see failure and decide
+
+        print(f"  Max iterations ({max_iterations}) reached")
+
+    def _get_head_commit(self, project_path: str) -> str:
+        """Get current HEAD commit hash."""
+        try:
+            result = subprocess.run(
+                ["git", "-C", project_path, "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=10
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return ""
+
+    def _reset_to_commit(self, project_path: str, commit: str):
+        """Reset project to a specific commit."""
+        if not commit:
+            return
+        try:
+            subprocess.run(
+                ["git", "-C", project_path, "reset", "--hard", commit],
+                capture_output=True, text=True, timeout=30
+            )
+            print(f"  Reset to commit {commit[:8]}")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     # -------------------------------------------------------------------------
     # Helper Methods
@@ -375,10 +568,14 @@ class Pipeline:
             "hints",
             "bug_fixes",
             "rootcause_logs",
-            "strategy",
             "suggestions",
             "fix_history.json",
             "dom_snapshots",
+            "commentator_diary",
+            "cleaner",
+            "cleaner_report.json",
+            "impact_analysis.json",
+            "senior_review.json",
         ]
 
         # Check if there's anything to archive
@@ -417,85 +614,3 @@ class Pipeline:
                     shutil.rmtree(src)
 
         print(f"Archived previous artifacts to: {run_archive}")
-
-    def _apply_supervisor_guidance(self) -> bool:
-        """Read supervisor guidance and apply git reset if needed. Returns False if escalating."""
-        guidance_path = self._artifacts_dir / "strategy" / "guidance.json"
-        if not guidance_path.exists():
-            print("  WARNING: Supervisor did not produce guidance file")
-            return True
-
-        try:
-            guidance = json.loads(guidance_path.read_text())
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"  WARNING: Could not read guidance: {e}")
-            return True
-
-        # Check for escalation
-        if guidance.get("escalate"):
-            print("  Supervisor recommends escalation — problem may require manual intervention")
-            if self.report:
-                self.report.log("pipeline", "supervisor_escalate", guidance.get("analysis", ""))
-            return False
-
-        # Apply git reset if rewind_commit is specified
-        rewind_commit = guidance.get("rewind_commit")
-        if not rewind_commit:
-            print("  Supervisor provided guidance but no rewind needed")
-            return True
-
-        # Safety check: verify rewind_commit is at or after base_commit
-        history = self.fix_history.read()
-        base_commit = history.get("base_commit", "")
-        project_path = os.getenv("PROJECT_PATH")
-
-        if base_commit and project_path:
-            # Check if base_commit is an ancestor of rewind_commit (rewind is at or after base)
-            result = subprocess.run(
-                ["git", "-C", project_path, "merge-base", "--is-ancestor", base_commit, rewind_commit],
-                capture_output=True, timeout=10
-            )
-            if result.returncode != 0:
-                print(f"  SAFETY: Refusing to reset — {rewind_commit[:8]} is before base commit {base_commit[:8]}")
-                if self.report:
-                    self.report.log("pipeline", "supervisor_safety_block",
-                                    f"Refused reset to {rewind_commit[:8]}, before base {base_commit[:8]}")
-                return True
-
-        # Do the reset
-        print(f"  Rewinding to commit {rewind_commit[:8]} (attempt {guidance.get('rewind_to_attempt', '?')})...")
-        result = subprocess.run(
-            ["git", "-C", project_path, "reset", "--hard", rewind_commit],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode != 0:
-            print(f"  ERROR: Git reset failed: {result.stderr}")
-            if self.report:
-                self.report.log("pipeline", "error", f"Git reset failed: {result.stderr}")
-            return True
-
-        print(f"  Rewound successfully. Direction: {guidance.get('direction', 'N/A')}")
-        if self.report:
-            self.report.log("pipeline", "supervisor_rewind",
-                            f"Reset to {rewind_commit[:8]}. Direction: {guidance.get('direction', '')}")
-
-        # Track intervention count
-        self.fix_history.increment_supervisor_interventions()
-
-        return True
-
-    def _notify_supervisor_intervention(self):
-        """Send notification about supervisor intervention."""
-        from messaging.telegram_manager import TelegramManager
-
-        guidance_path = self._artifacts_dir / "strategy" / "guidance.json"
-        if guidance_path.exists():
-            try:
-                guidance = json.loads(guidance_path.read_text())
-                rewind_to = guidance.get("rewind_to_attempt", "?")
-                analysis = guidance.get("analysis", "")
-                TelegramManager().send_message(
-                    f"🔄 Supervisor intervened: rewound to attempt {rewind_to}.\n{analysis}"
-                )
-            except (json.JSONDecodeError, OSError):
-                pass

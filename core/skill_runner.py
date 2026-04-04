@@ -13,13 +13,16 @@ class SkillRunner:
     """Runs Claude skills as subprocesses."""
 
     # Skills that need access to the target project
-    PROJECT_SKILLS = ("test-replicator", "trace-analyzer", "bug-fixer", "fix-applier", "fix-supervisor", "commit-fixes")
+    PROJECT_SKILLS = ("dom-capturer", "trace-analyzer", "bug-fixer", "fix-applier", "fix-committer", "cleaner", "impact-analyzer", "senior-reviewer")
 
     # Skills that need fix history
-    FIX_HISTORY_SKILLS = ("trace-analyzer", "bug-fixer", "fix-supervisor")
+    FIX_HISTORY_SKILLS = ("trace-analyzer", "bug-fixer", "cleaner")
 
-    # Skills that can use supervisor guidance
-    GUIDANCE_SKILLS = ("trace-analyzer", "bug-fixer")
+    # Skills with their own diary
+    DIARY_SKILLS = ("commentator", "cleaner")
+
+    # Skills that need full access (root dir + project + diary)
+    FULL_ACCESS_SKILLS = ("commentator", "cleaner")
 
     def __init__(self, root_dir: Path, skills_dir: Path):
         """Initialize the skill runner.
@@ -32,7 +35,8 @@ class SkillRunner:
         self._skills_dir = skills_dir
 
     def run(self, skill_name: str, timeout: int = 7200, cwd: str = None,
-            report: RunReport = None, fix_history: FixHistory = None) -> bool:
+            report: RunReport = None, fix_history: FixHistory = None,
+            diary_path: Path = None, tracking_path: Path = None) -> bool:
         """Run a Claude skill and return success/failure."""
         skill_path = self._skills_dir / f"{skill_name}.skill.md"
 
@@ -43,11 +47,11 @@ class SkillRunner:
         skill_content = skill_path.read_text()
         work_dir = cwd or str(self._root_dir)
 
-        prompt = self._build_prompt(skill_name, report, fix_history)
+        prompt = self._build_prompt(skill_name, report, fix_history, diary_path, tracking_path)
         cmd = self._build_command(skill_name, skill_content, prompt)
 
-        # Log skill start
-        if report:
+        # Log skill start (skip commentator to keep it isolated)
+        if report and skill_name != "commentator":
             report.log(skill_name, "started", f"Pipeline launched {skill_name}")
 
         # Start tailing the report file
@@ -66,7 +70,7 @@ class SkillRunner:
                 stdin=subprocess.DEVNULL
             )
             success = result.returncode == 0
-            if report:
+            if report and skill_name != "commentator":
                 status = "success" if success else "failed"
                 report.log(skill_name, "finished", f"{skill_name} {status} (exit code {result.returncode})")
             return success
@@ -88,7 +92,8 @@ class SkillRunner:
                 tail_thread.join(timeout=2)
 
     def _build_prompt(self, skill_name: str, report: RunReport = None,
-                      fix_history: FixHistory = None) -> str:
+                      fix_history: FixHistory = None, diary_path: Path = None,
+                      tracking_path: Path = None) -> str:
         """Build the prompt for a skill."""
         prompt = "Execute the task defined in the system prompt."
 
@@ -97,8 +102,8 @@ class SkillRunner:
         if skill_name in self.PROJECT_SKILLS and project_path:
             prompt += f" The target project is at: {project_path}"
 
-        # Pass test command to test-replicator
-        if skill_name == "test-replicator":
+        # Pass test command to dom-capturer
+        if skill_name == "dom-capturer":
             execute_command = os.getenv("EXECUTE_COMMAND", "npm test")
             prompt += f" Execute command: {execute_command}"
 
@@ -106,11 +111,16 @@ class SkillRunner:
         if skill_name in self.FIX_HISTORY_SKILLS and fix_history:
             prompt += f" Fix history file: {fix_history.path}"
 
-        # Add guidance path if supervisor has written one
-        if skill_name in self.GUIDANCE_SKILLS:
-            guidance_path = self._root_dir / "artifacts" / "strategy" / "guidance.json"
-            if guidance_path.exists():
-                prompt += f" Supervisor guidance file: {guidance_path}"
+        # Diary skills get fix history + diary path
+        if skill_name in self.DIARY_SKILLS:
+            if fix_history:
+                prompt += f" Fix history file: {fix_history.path}"
+            if diary_path:
+                prompt += f" Diary path: {diary_path}"
+
+        # Cleaner gets tracking path
+        if skill_name == "cleaner" and tracking_path:
+            prompt += f" Tracking file: {tracking_path}"
 
         # Add report path
         if report:
@@ -125,11 +135,18 @@ class SkillRunner:
             "--print",
             "--dangerously-skip-permissions",
             "--model", "claude-opus-4-5",
-            "--add-dir", str(self._root_dir),
         ]
 
+        # Add root dir access
+        cmd.extend(["--add-dir", str(self._root_dir)])
+
+        # Add project access for relevant skills
         project_path = os.getenv("PROJECT_PATH")
         if skill_name in self.PROJECT_SKILLS and project_path:
+            cmd.extend(["--add-dir", project_path])
+
+        # Full access skills get everything
+        if skill_name in self.FULL_ACCESS_SKILLS and project_path:
             cmd.extend(["--add-dir", project_path])
 
         cmd.extend(["--system-prompt", skill_content, prompt])

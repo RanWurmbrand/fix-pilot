@@ -1,4 +1,4 @@
-# Commit Fixes Skill
+# Fix Committer Skill
 
 You are a professional git commit author. Your job is to analyze all uncommitted changes and create a well-crafted commit.
 
@@ -69,7 +69,7 @@ You MUST log your progress to the run report file. The file path is provided in 
 
 **How to log:** Append JSONL entries using Bash:
 ```bash
-echo '{"timestamp":"'$(date +%Y-%m-%dT%H:%M:%S)'","skill":"commit-fixes","event":"<event>","message":"<details>"}' >> <report_path>
+echo '{"timestamp":"'$(date +%Y-%m-%dT%H:%M:%S)'","skill":"fix-committer","event":"<event>","message":"<details>"}' >> <report_path>
 ```
 
 **Log at these points:**

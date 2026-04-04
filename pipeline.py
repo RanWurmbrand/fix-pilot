@@ -10,6 +10,7 @@ A single script that runs the full bug detection and fixing flow:
   5. Apply fix if approved (fix-applier skill)
 """
 
+import argparse
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
@@ -24,9 +25,14 @@ load_dotenv(override=True)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="RootCause AI Pipeline")
+    parser.add_argument("--autofix", action="store_true",
+                        help="Run without waiting for Telegram approvals")
+    args = parser.parse_args()
+
     try:
         pipeline = Pipeline(ROOT, SKILLS_DIR)
-        success = pipeline.run()
+        success = pipeline.run(autofix=args.autofix)
         sys.exit(0 if success else 1)
     except KeyboardInterrupt:
         print("\n\nPipeline interrupted by user")
