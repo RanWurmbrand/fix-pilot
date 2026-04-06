@@ -125,11 +125,6 @@ In Cypress, DOM is always accessed uniformly via `cy.get("body")`. There is no n
      cy.writeFile(outputPath, html + iframeSection, 'utf-8');
      cy.log('[DOM-CAPTURER] DOM captured to: ' + outputPath);
    });
-
-   // Halt test
-   cy.then(() => {
-     throw new Error('[DOM-CAPTURER] DOM captured, halting test.');
-   });
    // ===== END INJECTION =====
    ```
 
@@ -138,21 +133,16 @@ In Cypress, DOM is always accessed uniformly via `cy.get("body")`. There is no n
 5. Write the modified content back to the original file using the Write tool
 
 ### Step 4: Run the Test
-Use the `execute_command` from the prompt parameters to run the test. Strip any existing `--spec` from the command and append your own:
+Use the `execute_command` from the prompt parameters to run the test. Strip any existing `--spec` from the command and append your own. **Save the test output to a log file:**
 
 ```bash
 cd <project_test_directory>
-<execute_command_without_spec> --spec <test_file>
-```
-
-**Example:** If `execute_command=npm run e2e:run:local -- --headed --spec "some/other/test.ts"`, strip the `--spec "..."` part and use:
-```bash
-npm run e2e:run:local -- --headed --spec <your_test_file>
+<execute_command_without_spec> --spec <test_file> 2>&1 | tee <artifacts_dir>/rootcause_logs/run_<timestamp>.log
 ```
 
 **Fallback:** If `execute_command` is not provided, use `npx cypress run --spec <test_file> --headed`.
 
-The test will run normally, but when it reaches the injected code, it will capture the DOM and halt.
+The test will run normally, and when it reaches the injected code, it will capture the DOM then continue to the original failing line.
 
 ### Step 5: Verify DOM Capture
 Check that the DOM snapshot was created:

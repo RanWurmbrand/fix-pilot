@@ -92,12 +92,13 @@ class Pipeline:
                     return True
             skip_tests = False
 
-            # Step 2: Copy screenshot, then capture DOM
+            # Step 2: Copy screenshots and DOM snapshots
             self._copy_screenshot()
-            if not self._step_replicate():
-                print("\nPipeline stopped: DOM capture failed")
-                return False
-            self._rename_screenshot_to_match_dom()
+            self._copy_dom_snapshot()
+            # self._rename_screenshot_to_match_dom()
+
+            # Commentator observes after DOM capture
+            self._step_commentator()
 
             # Step 3: Analyze
             if not self._step_analyze():
@@ -128,27 +129,38 @@ class Pipeline:
                     continue
 
             if action == "fix_and_rerun":
-                # Step 6: Apply fix
-                if not self._step_apply_fix():
-                    print("\nPipeline stopped: Fix application failed")
-                    return False
-
                 fix_attempted = True  # Mark that a fix has been attempted
 
-                # Run tests after fix
+                # Run tests after fix (bug-fixer already applied the fix)
                 print("\nFix applied. Rerunning tests...")
                 success, all_passed = self._step_run_tests()
 
-                # Commentator observes after tests (only after fix was attempted)
-                self._step_commentator()
                 if not success:
                     self.fix_history.record_attempt("failed", "Test execution failed")
                     print("\nPipeline stopped: Test execution failed")
                     return False
 
                 if all_passed:
+                    # Verification run: run tests again to confirm fix is stable
+                    print("\n✓ Tests passed. Running verification...")
+                    success, verified = self._step_run_tests()
+                    if not success:
+                        self.fix_history.record_attempt("failed", "Verification run failed")
+                        print("\nPipeline stopped: Verification test execution failed")
+                        return False
+
+                    if not verified:
+                        # Verification failed - continue normal pipeline
+                        print("\n⚠ Verification failed - fix may be flaky")
+                        logs_dir = self._artifacts_dir / "rootcause_logs"
+                        log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
+                        error_summary = extract_error_summary(log_files[-1]) if log_files else ""
+                        self.fix_history.record_attempt("failed", f"Verification failed: {error_summary}")
+                        skip_tests = True
+                        continue
+
                     self.fix_history.record_attempt("passed")
-                    print("\n✓ All tests passed after fix!")
+                    print("\n✓ All tests passed after fix (verified)!")
 
                     # Run cleaner loop
                     if not self._run_cleaner_loop():
@@ -187,7 +199,10 @@ class Pipeline:
 
     def _step_run_tests(self) -> tuple[bool, bool]:
         """Run the test suite. Returns (success, all_passed)."""
-        print("\n[1/6] Running tests...")
+        print("\n[1/4] Running tests...")
+
+        # Clean DOM snapshots before each test run
+        self._clean_dom_snapshots()
 
         # Import here to avoid circular issues
         sys.path.insert(0, str(self._root_dir))
@@ -231,30 +246,39 @@ class Pipeline:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
-    def _rename_screenshot_to_match_dom(self):
-        """Rename screenshot to match DOM snapshot filename."""
-        script = self._root_dir / "scripts" / "rename_screenshot_to_match_dom.sh"
+    def _copy_dom_snapshot(self):
+        """Copy DOM snapshot to artifacts."""
+        project_path = os.getenv("PROJECT_PATH")
+        if not project_path:
+            return
+        script = self._root_dir / "scripts" / "copy_dom_snapshot.sh"
         try:
             subprocess.run(
-                [str(script), str(self._artifacts_dir)],
+                [str(script), project_path, str(self._artifacts_dir)],
                 capture_output=True, text=True, timeout=30
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
-    def _step_replicate(self) -> bool:
-        """Capture DOM at failure point using dom-capturer skill."""
-        print("\n[2/6] Capturing DOM...")
-        return self.skill_runner.run("dom-capturer", timeout=3600, report=self.report)
+    # def _rename_screenshot_to_match_dom(self):
+    #     """Rename screenshot to match DOM snapshot filename."""
+    #     script = self._root_dir / "scripts" / "rename_screenshot_to_match_dom.sh"
+    #     try:
+    #         subprocess.run(
+    #             [str(script), str(self._artifacts_dir)],
+    #             capture_output=True, text=True, timeout=30
+    #         )
+    #     except (subprocess.TimeoutExpired, FileNotFoundError):
+    #         pass
 
     def _step_analyze(self) -> bool:
         """Analyze test failure using trace-analyzer skill."""
-        print("\n[3/6] Analyzing failure...")
+        print("\n[2/4] Analyzing failure...")
         return self.skill_runner.run("trace-analyzer", timeout=3600, report=self.report, fix_history=self.fix_history)
 
     def _step_generate_fix(self) -> bool:
-        """Generate fix using bug-fixer skill."""
-        print("\n[4/6] Generating fix...")
+        """Generate and apply fix using bug-fixer skill."""
+        print("\n[3/4] Generating and applying fix...")
         return self.skill_runner.run("bug-fixer", timeout=3600, report=self.report, fix_history=self.fix_history)
 
     def _step_notify_success(self):
@@ -268,7 +292,7 @@ class Pipeline:
 
     def _step_notify(self) -> str:
         """Send Telegram notification and wait for user response."""
-        print("\n[5/6] Sending notification...")
+        print("\n[4/4] Sending notification...")
 
         from messaging.bugfix_notifier import BugFixMessageBuilder
         from messaging.telegram_manager import TelegramManager
@@ -310,11 +334,6 @@ class Pipeline:
             return "suggest"
 
         return action
-
-    def _step_apply_fix(self) -> bool:
-        """Apply fix using fix-applier skill."""
-        print("\n[6/6] Applying fix...")
-        return self.skill_runner.run("fix-applier", timeout=3600, report=self.report)
 
     def _step_commit_fixes(self) -> bool:
         """Commit all fixes using fix-committer skill."""
@@ -614,3 +633,10 @@ class Pipeline:
                     shutil.rmtree(src)
 
         print(f"Archived previous artifacts to: {run_archive}")
+
+    def _clean_dom_snapshots(self):
+        """Remove DOM snapshots folder before running tests."""
+        dom_snapshots_dir = self._artifacts_dir / "dom_snapshots"
+        if dom_snapshots_dir.exists():
+            shutil.rmtree(dom_snapshots_dir)
+            print("  Cleaned DOM snapshots folder")

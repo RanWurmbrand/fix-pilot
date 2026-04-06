@@ -11,9 +11,6 @@ class ProjectRunner:
         self.logs_dir = ROOT / "artifacts" / "rootcause_logs"
         self.logs_dir.mkdir(exist_ok=True)
         
-        self.output_logs_dir = ROOT / "artifacts" / "output_logs"
-        self.output_logs_dir.mkdir(exist_ok=True)
-        
         self.collect_output = os.getenv("COLLECT_OUTPUT_LOGS", "").lower() == "true"
         self.output_log_name = os.getenv("OUTPUT_LOG_NAME", "")
 

@@ -1,5 +1,6 @@
 """Skill runner for executing Claude skills."""
 
+import json
 import os
 import subprocess
 import threading
@@ -110,6 +111,22 @@ class SkillRunner:
         # Add fix history path
         if skill_name in self.FIX_HISTORY_SKILLS and fix_history:
             prompt += f" Fix history file: {fix_history.path}"
+
+            # After 10 failed attempts, pass diary content to trace-analyzer
+            if skill_name == "trace-analyzer":
+                try:
+                    history = fix_history.read()
+                    attempts = len(history.get("attempts", []))
+                    if attempts >= 10:
+                        diary_file = self._root_dir / "artifacts" / "commentator_diary" / "diary.json"
+                        if diary_file.exists():
+                            diary = json.loads(diary_file.read_text())
+                            entries = diary.get("entries", [])[-5:]
+                            comments = [e.get("comment", "") for e in entries if e.get("comment")]
+                            if comments:
+                                prompt += f" IMPORTANT - After {attempts} failed attempts, here are observations from the commentator (last 5 runs): {'; '.join(comments)}"
+                except (json.JSONDecodeError, OSError):
+                    pass
 
         # Diary skills get fix history + diary path
         if skill_name in self.DIARY_SKILLS:
