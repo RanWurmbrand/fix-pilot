@@ -18,6 +18,9 @@ from core.skill_runner import SkillRunner
 class Pipeline:
     """Orchestrates the full bug detection and fixing flow."""
 
+    MAX_FIX_ATTEMPTS = 15
+    MAX_CLEANER_ATTEMPTS = 15
+
     def __init__(self, root_dir: Path, skills_dir: Path):
         """Initialize the pipeline.
 
@@ -33,14 +36,10 @@ class Pipeline:
         self.report: RunReport = None
         self.fix_history: FixHistory = None
         self.skill_runner: SkillRunner = None
+        self._base_commit: str = ""  # Commit to restore to on give-up
 
-    def run(self, autofix: bool = False) -> bool:
-        """Run the full pipeline with loop support.
-
-        Args:
-            autofix: If True, skip Telegram approvals and auto-apply fixes.
-        """
-        self._autofix = autofix
+    def run(self) -> bool:
+        """Run the full pipeline with loop support."""
         print("=" * 50)
         print("RootCause AI Pipeline")
         print("=" * 50)
@@ -50,10 +49,11 @@ class Pipeline:
 
         # Create a new branch for this fix attempt
         print("\nCreating fix branch...")
-        branch_name = self._create_fix_branch()
+        branch_name, base_commit = self._create_fix_branch()
         if not branch_name:
             print("Pipeline stopped: Could not create fix branch")
             return False
+        self._base_commit = base_commit
 
         self.report = RunReport(self._artifacts_dir)
         print(f"Run report: {self.report.path}")
@@ -87,15 +87,9 @@ class Pipeline:
                 # If all tests passed on first run, no fixes needed
                 if all_passed:
                     print("\n✓ All tests passed!")
-                    if not self._autofix:
-                        self._step_notify_success()
+                    self._step_notify_success()
                     return True
             skip_tests = False
-
-            # Step 2: Copy screenshots and DOM snapshots
-            self._copy_screenshot()
-            self._copy_dom_snapshot()
-            # self._rename_screenshot_to_match_dom()
 
             # Commentator observes after DOM capture
             self._step_commentator()
@@ -110,88 +104,72 @@ class Pipeline:
                 print("\nPipeline stopped: Fix generation failed")
                 return False
 
-            # Step 5: Notify and get user action (skip if autofix)
-            if self._autofix:
-                action = "fix_and_rerun"
-            else:
-                action = self._step_notify()
+            # Step 5: Apply fix and rerun
+            fix_attempted = True  # Mark that a fix has been attempted
 
-                if action == "terminate":
-                    print("\nPipeline stopped by user")
-                    return True
+            # Run tests after fix (bug-fixer already applied the fix)
+            print("\nFix applied. Rerunning tests...")
+            success, all_passed = self._step_run_tests()
 
-                if action == "rerun":
-                    print("\nRerunning tests...")
-                    continue
+            if not success:
+                self.fix_history.record_attempt("failed", "Test execution failed")
+                print("\nPipeline stopped: Test execution failed")
+                return False
 
-                if action == "suggest":
-                    print("\nRe-analyzing with user suggestion...")
-                    continue
-
-            if action == "fix_and_rerun":
-                fix_attempted = True  # Mark that a fix has been attempted
-
-                # Run tests after fix (bug-fixer already applied the fix)
-                print("\nFix applied. Rerunning tests...")
-                success, all_passed = self._step_run_tests()
-
+            if all_passed:
+                # Verification run: run tests again to confirm fix is stable
+                print("\n✓ Tests passed. Running verification...")
+                success, verified = self._step_run_tests()
                 if not success:
-                    self.fix_history.record_attempt("failed", "Test execution failed")
-                    print("\nPipeline stopped: Test execution failed")
+                    self.fix_history.record_attempt("failed", "Verification run failed")
+                    print("\nPipeline stopped: Verification test execution failed")
                     return False
 
-                if all_passed:
-                    # Verification run: run tests again to confirm fix is stable
-                    print("\n✓ Tests passed. Running verification...")
-                    success, verified = self._step_run_tests()
-                    if not success:
-                        self.fix_history.record_attempt("failed", "Verification run failed")
-                        print("\nPipeline stopped: Verification test execution failed")
-                        return False
+                if not verified:
+                    # Verification failed - continue normal pipeline
+                    print("\n⚠ Verification failed - fix may be flaky")
+                    logs_dir = self._artifacts_dir / "rootcause_logs"
+                    log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
+                    error_summary = extract_error_summary(log_files[-1]) if log_files else ""
+                    self.fix_history.record_attempt("failed", f"Verification failed: {error_summary}")
+                    skip_tests = True
+                    continue
 
-                    if not verified:
-                        # Verification failed - continue normal pipeline
-                        print("\n⚠ Verification failed - fix may be flaky")
-                        logs_dir = self._artifacts_dir / "rootcause_logs"
-                        log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
-                        error_summary = extract_error_summary(log_files[-1]) if log_files else ""
-                        self.fix_history.record_attempt("failed", f"Verification failed: {error_summary}")
-                        skip_tests = True
-                        continue
+                self.fix_history.record_attempt("passed")
+                print("\n✓ All tests passed after fix (verified)!")
 
-                    self.fix_history.record_attempt("passed")
-                    print("\n✓ All tests passed after fix (verified)!")
+                # Run cleaner loop
+                if not self._run_cleaner_loop():
+                    print("\nPipeline stopped: Cleaner loop failed")
+                    return False
 
-                    # Run cleaner loop
-                    if not self._run_cleaner_loop():
-                        print("\nPipeline stopped: Cleaner loop failed")
-                        return False
+                # Analyze impact - find all tests that might be affected
+                self._step_impact_analysis()
 
-                    # Analyze impact - find all tests that might be affected
-                    self._step_impact_analysis()
+                # Senior review loop - refactor if needed
+                self._run_senior_review_loop()
 
-                    self._step_commit_fixes()
+                self._step_commit_fixes()
 
-                    # Senior review loop - refactor if needed
-                    self._run_senior_review_loop()
+                self._step_notify_success()
+                return True
 
-                    if not self._autofix:
-                        self._step_notify_success()
-                    return True
+            # Tests still failing — record attempt with error summary
+            logs_dir = self._artifacts_dir / "rootcause_logs"
+            log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
+            error_summary = extract_error_summary(log_files[-1]) if log_files else ""
+            self.fix_history.record_attempt("failed", error_summary)
 
-                # Tests still failing — record attempt with error summary
-                logs_dir = self._artifacts_dir / "rootcause_logs"
-                log_files = sorted(logs_dir.glob("run_*.log"), key=lambda f: f.stat().st_mtime)
-                error_summary = extract_error_summary(log_files[-1]) if log_files else ""
-                self.fix_history.record_attempt("failed", error_summary)
+            # Check if we've exceeded max attempts
+            attempt_count = len(self.fix_history.read().get("attempts", []))
+            if attempt_count >= self.MAX_FIX_ATTEMPTS:
+                print(f"\n✗ Giving up after {attempt_count} failed attempts")
+                self._give_up_and_restore()
+                return False
 
-                # Continue pipeline — skip tests since we just ran them
-                skip_tests = True
-                continue
-
-            # Unknown action
-            print(f"\nUnknown action: {action}")
-            return False
+            # Continue pipeline — skip tests since we just ran them
+            skip_tests = True
+            continue
 
     # -------------------------------------------------------------------------
     # Pipeline Steps
@@ -225,6 +203,11 @@ class Pipeline:
             if self.report:
                 self.report.log("pipeline", "step", f"Tests finished. Exit code: {exit_code}. Log: {log_file}")
             all_passed = exit_code == 0
+
+            # Copy screenshots and DOM snapshots after every test run
+            self._copy_screenshot()
+            self._copy_dom_snapshot()
+
             return True, all_passed
         except Exception as e:
             print(f"  ERROR: {e}")
@@ -253,10 +236,12 @@ class Pipeline:
             return
         script = self._root_dir / "scripts" / "copy_dom_snapshot.sh"
         try:
-            subprocess.run(
+            result = subprocess.run(
                 [str(script), project_path, str(self._artifacts_dir)],
                 capture_output=True, text=True, timeout=30
             )
+            if result.stdout.strip():
+                print(f"  {result.stdout.strip()}")
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
@@ -290,51 +275,6 @@ class Pipeline:
         tm = TelegramManager()
         tm.send_message("✅ All tests passed! No issues found.")
 
-    def _step_notify(self) -> str:
-        """Send Telegram notification and wait for user response."""
-        print("\n[4/4] Sending notification...")
-
-        from messaging.bugfix_notifier import BugFixMessageBuilder
-        from messaging.telegram_manager import TelegramManager
-
-        builder = BugFixMessageBuilder()
-        message, is_long = builder.build_message()
-
-        tm = TelegramManager()
-
-        if is_long:
-            tm.send_document(message, "bugfix_summary.html", "Bug Fix Summary (see attached)")
-            tm.send_bugfix_message("Full report sent as file. Choose action:")
-        else:
-            tm.send_bugfix_message(message)
-
-        print("  Waiting for user response...")
-        action = tm.wait_for_user_response()
-        print(f"  User chose: {action}")
-
-        # Handle suggestion flow
-        if action == "suggest":
-            tm.send_message("Please provide your suggestion:")
-            suggestion = tm.wait_for_text_message()
-            print(f"  Received suggestion: {suggestion[:50]}...")
-
-            # Save suggestion
-            suggestions_dir = self._artifacts_dir / "suggestions"
-            suggestions_dir.mkdir(exist_ok=True)
-
-            timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-            suggestion_file = suggestions_dir / f"suggestion_{timestamp}.json"
-            suggestion_file.write_text(json.dumps({
-                "timestamp": timestamp,
-                "user_suggestion": suggestion,
-                "action": "re_analyze"
-            }, indent=2))
-
-            tm.send_message("Got it! Re-analyzing...")
-            return "suggest"
-
-        return action
-
     def _step_commit_fixes(self) -> bool:
         """Commit all fixes using fix-committer skill."""
         print("\nCommitting fixes...")
@@ -367,7 +307,16 @@ class Pipeline:
         """Run cleaner loop: clean, test, restore if needed, repeat until pass."""
         print("\n[Cleaner] Starting cleanup loop...")
 
+        cleaner_attempts = 0
         while True:
+            cleaner_attempts += 1
+
+            # Check if we've exceeded max attempts
+            if cleaner_attempts > self.MAX_CLEANER_ATTEMPTS:
+                print(f"\n✗ Cleaner giving up after {self.MAX_CLEANER_ATTEMPTS} failed attempts")
+                self._give_up_and_restore()
+                return False
+
             # Run cleaner
             if not self._step_cleaner():
                 print("  Cleaner failed")
@@ -386,7 +335,7 @@ class Pipeline:
                 return True
 
             # Tests failed - cleaner will restore on next iteration
-            print("  Tests failed after cleanup, cleaner will restore...")
+            print(f"  Tests failed after cleanup (attempt {cleaner_attempts}/{self.MAX_CLEANER_ATTEMPTS}), cleaner will restore...")
 
     def _step_commit_cleanup(self) -> bool:
         """Commit cleanup changes."""
@@ -400,10 +349,34 @@ class Pipeline:
         from messaging.telegram_manager import TelegramManager
 
         tm = TelegramManager()
-        if self._autofix:
-            tm.send_message("✅ Autofix complete! Tests pass, cleanup done, changes committed.")
-        else:
-            tm.send_message("🧹 Cleanup complete! Unnecessary code removed and committed.")
+        tm.send_message("✅ Autofix complete! Tests pass, cleanup done, changes committed.")
+
+    def _notify_rejection(self, reason: str):
+        """Send Telegram notification that fix was rejected."""
+        print("\nNotifying user: Fix rejected!")
+
+        from messaging.telegram_manager import TelegramManager
+
+        tm = TelegramManager()
+        tm.send_message(f"❌ Fix rejected by senior reviewer: {reason}")
+
+    def _give_up_and_restore(self):
+        """Restore target repo to base commit and notify user."""
+        project_path = os.getenv("PROJECT_PATH")
+        if project_path and self._base_commit:
+            self._reset_to_commit(project_path, self._base_commit)
+            print(f"  Restored repo to base commit {self._base_commit[:8]}")
+
+        self._notify_give_up()
+
+    def _notify_give_up(self):
+        """Send Telegram notification that we gave up on fixing."""
+        print("\nNotifying user: Gave up on fix!")
+
+        from messaging.telegram_manager import TelegramManager
+
+        tm = TelegramManager()
+        tm.send_message(f"⚠️ Gave up after {self.MAX_FIX_ATTEMPTS} failed attempts. Repo restored to original state.")
 
     def _step_impact_analysis(self) -> bool:
         """Analyze which tests might be affected by the changes."""
@@ -456,6 +429,17 @@ class Pipeline:
 
             if decision == "approved":
                 print("  ✓ Fix approved by senior reviewer")
+                return
+
+            if decision == "rejected":
+                reason = review.get("reason", "Fix weakens test instead of fixing bug")
+                print(f"  ✗ Fix rejected: {reason}")
+                # Revert to base commit - the fix is illegitimate
+                base_commit = self.fix_history.read().get("base_commit", "")
+                if base_commit:
+                    self._reset_to_commit(project_path, base_commit)
+                    print("  Reverted to base commit")
+                self._notify_rejection(reason)
                 return
 
             if decision == "stopped":
@@ -515,12 +499,15 @@ class Pipeline:
     # Helper Methods
     # -------------------------------------------------------------------------
 
-    def _create_fix_branch(self) -> str:
-        """Create a new branch for this fix attempt. Returns branch name or empty string on failure."""
+    def _create_fix_branch(self) -> tuple[str, str]:
+        """Create a new branch for this fix attempt. Returns (branch_name, base_commit) or ("", "") on failure."""
         project_path = os.getenv("PROJECT_PATH")
         if not project_path:
             print("  ERROR: PROJECT_PATH not set")
-            return ""
+            return "", ""
+
+        # Save base commit before creating branch
+        base_commit = self._get_head_commit(project_path)
 
         # Extract test name from command
         execute_command = os.getenv("EXECUTE_COMMAND", "")
@@ -539,14 +526,14 @@ class Pipeline:
             )
             if result.returncode != 0:
                 print(f"  ERROR: Failed to create branch: {result.stderr}")
-                return ""
+                return "", ""
 
             print(f"  Created branch: {branch_name}")
-            return branch_name
+            return branch_name, base_commit
 
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             print(f"  ERROR: {e}")
-            return ""
+            return "", ""
 
     def _extract_test_name_from_command(self, command: str) -> str:
         """Extract test name from EXECUTE_COMMAND for branch naming."""

@@ -5,17 +5,19 @@ REPO="konveyor/tackle2-ui"
 WORKFLOW="nightly-main-e2e.yaml"
 TMP_DIR=$(mktemp -d)
 
-# Get latest run ID
-RUN_ID=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --limit 1 --json databaseId --jq '.[0].databaseId')
+# Get last 2 run IDs
+RUN_IDS=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --limit 1 --json databaseId --jq '.[].databaseId')
 
-echo "Fetching artifacts from run $RUN_ID..." >&2
+for RUN_ID in $RUN_IDS; do
+  echo "Fetching artifacts from run $RUN_ID..." >&2
 
-# Get artifact names
-ARTIFACTS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].name')
+  # Get artifact names
+  ARTIFACTS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].name')
 
-# Download each artifact
-for name in $ARTIFACTS; do
-  gh run download "$RUN_ID" --repo "$REPO" --name "$name" --dir "$TMP_DIR/$name" 2>/dev/null
+  # Download each artifact (skip secretsNeeded - requires private credentials)
+  for name in $ARTIFACTS; do
+    gh run download "$RUN_ID" --repo "$REPO" --name "$name" --dir "$TMP_DIR/$name" 2>/dev/null
+  done
 done
 
 # Extract only test files that have failures

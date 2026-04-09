@@ -39,15 +39,25 @@ def fetch_nightly_failures():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RootCause AI Pipeline")
-    parser.add_argument("--autofix", action="store_true",
-                        help="Run without waiting for Telegram approvals")
     parser.add_argument("--nightly", action="store_true",
                         help="Fetch failing tests from nightly CI and run pipeline on each")
+    parser.add_argument("--ft", action="store_true",
+                        help="Run pipeline on existing failing_tests.json without fetching")
     args = parser.parse_args()
 
     try:
-        if args.nightly:
+        if args.ft:
+            failing_tests_file = ROOT / "artifacts" / "failing_tests.json"
+            if not failing_tests_file.exists():
+                print("No failing_tests.json found. Run --nightly first.")
+                sys.exit(1)
+            failing_tests = json.loads(failing_tests_file.read_text())
+        elif args.nightly:
             failing_tests = fetch_nightly_failures()
+        else:
+            failing_tests = None
+
+        if failing_tests is not None:
             print(f"Found {len(failing_tests)} failing tests")
             for test in failing_tests:
                 print(f"  - {test}")
@@ -59,17 +69,17 @@ if __name__ == "__main__":
                 print("="*50)
 
                 import os
-                os.environ["EXECUTE_COMMAND"] = f'npm run e2e:run:local -- --spec "{test}"'
+                os.environ["EXECUTE_COMMAND"] = f'npm run e2e:run:local -- --headed --spec "{test}"'
 
                 pipeline = Pipeline(ROOT, SKILLS_DIR)
-                success = pipeline.run(autofix=args.autofix)
+                success = pipeline.run()
                 results.append({"test": test, "success": success})
 
                 if not success:
                     print(f"\nPipeline failed for {test}, continuing to next...")
 
             print(f"\n{'='*50}")
-            print("Nightly run complete")
+            print("Run complete")
             print("="*50)
             passed = sum(1 for r in results if r["success"])
             print(f"Results: {passed}/{len(results)} succeeded")
@@ -80,7 +90,7 @@ if __name__ == "__main__":
             sys.exit(0 if passed == len(results) else 1)
 
         pipeline = Pipeline(ROOT, SKILLS_DIR)
-        success = pipeline.run(autofix=args.autofix)
+        success = pipeline.run()
         sys.exit(0 if success else 1)
     except KeyboardInterrupt:
         print("\n\nPipeline interrupted by user")

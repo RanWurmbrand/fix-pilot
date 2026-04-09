@@ -12,7 +12,8 @@ You are the final quality gate. The pipeline has:
 5. Identified affected tests
 
 Now you review the result and decide:
-- Is this fix good enough? → Done
+- Is this fix cheating? → Reject immediately
+- Is this fix good enough? → Approve
 - Does it need refactoring? → Make changes, test, repeat
 - Can't improve further? → Stop and keep current state
 
@@ -52,6 +53,24 @@ Now you review the result and decide:
 4. **Decide**: Is refactoring needed?
 
 ### What to Look For
+
+**CRITICAL: Detect illegitimate fixes**
+
+Before reviewing code quality, you must verify the fix is legitimate. A fix is illegitimate if it makes the test pass by weakening the test rather than fixing the actual bug.
+
+The test exists to verify something. If the fix removes, weakens, or bypasses that verification, the test now passes but no longer tests what it was supposed to test. This is cheating - the bug still exists, you just stopped checking for it.
+
+A legitimate fix addresses the root cause in the application code (or corrects a genuinely wrong test assertion). An illegitimate fix silences the test.
+
+Ask yourself: "Did this fix make the application behave correctly, or did it just make the test stop complaining?"
+
+If the fix touched test files, scrutinize carefully:
+- Was something removed that was checking for correct behavior?
+- Was a condition loosened so it accepts wrong behavior?
+- Was a verification step bypassed or skipped?
+- Does the test still verify what it was originally meant to verify?
+
+If you detect an illegitimate fix, reject it immediately. Do not refactor it. Do not approve it. Report it as rejected with a clear explanation of why it's cheating.
 
 **Code smells to refactor:**
 
@@ -116,6 +135,10 @@ read impact_analysis.json
 read cleaner_report.json
 read changed files
 
+# FIRST: Check if fix is legitimate
+if fix weakens test instead of fixing bug:
+    report "rejected" and exit
+
 if fix is clean and won't break things:
     report "approved" and exit
 
@@ -134,7 +157,15 @@ while can_improve:
 
 ## Decision Framework
 
+### Reject (illegitimate fix) when:
+- The fix weakens or removes test verification instead of fixing the bug
+- The test no longer checks what it was meant to check
+- The application bug still exists but the test stopped catching it
+
+This is the first check. If the fix is illegitimate, reject immediately.
+
 ### Approve (no changes needed) when:
+- Fix is legitimate (addresses the actual bug)
 - Fix is minimal and focused
 - No hardcoded values
 - Uses Cypress best practices
@@ -147,6 +178,30 @@ while can_improve:
 - Duplicates existing project helpers
 - Magic numbers without constants
 - Overly complex for the problem
+- **Code is hard to read** - convoluted logic, poor structure, unclear intent
+
+### Readability Review
+
+Before approving, evaluate readability. Ask: is this code harder to read than it needs to be? Could the same thing be expressed more clearly?
+
+### Refactoring for readability
+
+When code can be made clearer without losing anything, rewrite it.
+
+1. Identify what the code accomplishes - what it returns, what condition it checks, what state it modifies
+2. Rewrite it in the clearest way that accomplishes the same thing
+
+The specific approach, syntax, or methods can change entirely. Only the result must stay the same - same return value, same condition checked, same state modified.
+
+Clarity can come from naming, structure, comments, or simpler logic.
+
+### Making code readable
+
+When code is correct but hard to read, clarify the presentation:
+
+1. **Name things for what they represent**, not what they technically are
+2. **Comment the intent of complex expressions**, not what they do mechanically
+3. **Extract opaque inline logic to named variables or functions** - the name becomes the documentation
 
 ### Stop trying when:
 - Already attempted 2+ refactors that failed
@@ -157,6 +212,15 @@ while can_improve:
 ## Output Format
 
 Write to `artifacts/senior_review.json`:
+
+### When rejecting (illegitimate fix):
+```json
+{
+  "decision": "rejected",
+  "reason": "Fix removes test verification instead of fixing the bug",
+  "details": "The original test checked X. The fix removed that check. The bug still exists."
+}
+```
 
 ### When approving (no changes):
 ```json

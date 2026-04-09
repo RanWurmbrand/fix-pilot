@@ -10,7 +10,7 @@ if [ -z "$PROJECT_PATH" ]; then
     exit 1
 fi
 
-ROOTCAUSE_DIR="$PROJECT_PATH/cypress/run/RootcauseAI"
+ROOTCAUSE_DIR="$PROJECT_PATH/run/RootcauseAI"
 SNAPSHOT=$(find "$ROOTCAUSE_DIR" -name "*.html" -type f 2>/dev/null | head -1)
 
 if [ -z "$SNAPSHOT" ]; then
